@@ -1,16 +1,100 @@
 import os
+import time
 import uuid
 import glob
 import json
 import subprocess
 import threading
+from urllib.parse import unquote
+
 from flask import Flask, request, jsonify, send_file, render_template
 
 app = Flask(__name__)
-DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_DIR = os.path.join(_BASE_DIR, "downloads")
+SETTINGS_PATH = os.path.join(_BASE_DIR, "settings.json")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 jobs = {}
+
+_CLEANUP_INTERVAL_SEC = 3600
+
+
+def _load_settings_raw():
+    default = {"auto_delete_days": 0}
+    if not os.path.isfile(SETTINGS_PATH):
+        return default
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return default
+        days = data.get("auto_delete_days", 0)
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            days = 0
+        return {"auto_delete_days": max(0, days)}
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _save_settings_raw(settings):
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+
+
+def safe_download_path(filename):
+    """Resolve filename under DOWNLOAD_DIR; return None if invalid or path traversal."""
+    if not filename or not isinstance(filename, str):
+        return None
+    filename = unquote(filename).strip()
+    if not filename or filename in (".", "..") or "\x00" in filename:
+        return None
+    if os.sep in filename or (os.altsep and os.altsep in filename):
+        return None
+    if filename.startswith("/"):
+        return None
+    base = os.path.realpath(DOWNLOAD_DIR)
+    candidate = os.path.realpath(os.path.join(DOWNLOAD_DIR, filename))
+    if not candidate.startswith(base + os.sep):
+        return None
+    return candidate
+
+
+def cleanup_old_downloads():
+    """Remove files in DOWNLOAD_DIR older than auto_delete_days (if > 0)."""
+    settings = _load_settings_raw()
+    days = settings.get("auto_delete_days", 0)
+    if days <= 0:
+        return
+    cutoff = time.time() - (days * 86400)
+    try:
+        for name in os.listdir(DOWNLOAD_DIR):
+            path = safe_download_path(name)
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def cleanup_loop():
+    while True:
+        time.sleep(_CLEANUP_INTERVAL_SEC)
+        try:
+            cleanup_old_downloads()
+        except Exception:
+            pass
+
+
+def start_cleanup_thread():
+    t = threading.Thread(target=cleanup_loop, daemon=True)
+    t.start()
 
 
 def run_download(job_id, url, format_choice, format_id):
@@ -165,7 +249,78 @@ def download_file(job_id):
     return send_file(job["file"], as_attachment=True, download_name=job["filename"])
 
 
+@app.route("/api/library", methods=["GET"])
+def list_library():
+    items = []
+    try:
+        names = os.listdir(DOWNLOAD_DIR)
+    except OSError:
+        return jsonify({"files": []})
+    for name in names:
+        path = safe_download_path(name)
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        items.append({
+            "name": name,
+            "size": st.st_size,
+            "mtime": int(st.st_mtime),
+            "ext": ext,
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return jsonify({"files": items})
+
+
+@app.route("/api/library/<filename>", methods=["GET"])
+def library_get_file(filename):
+    path = safe_download_path(filename)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
+
+@app.route("/api/library/<filename>", methods=["DELETE"])
+def library_delete_file(filename):
+    path = safe_download_path(filename)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+    try:
+        os.remove(path)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    return jsonify(_load_settings_raw())
+
+
+@app.route("/api/settings", methods=["POST"])
+def post_settings():
+    data = request.json or {}
+    try:
+        days = data.get("auto_delete_days", 0)
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({"error": "auto_delete_days must be a non-negative integer"}), 400
+    if days < 0:
+        return jsonify({"error": "auto_delete_days must be >= 0"}), 400
+    _save_settings_raw({"auto_delete_days": days})
+    # Run cleanup once after saving so user sees immediate effect if applicable
+    try:
+        cleanup_old_downloads()
+    except Exception:
+        pass
+    return jsonify(_load_settings_raw())
+
+
 if __name__ == "__main__":
+    start_cleanup_thread()
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")
     app.run(host=host, port=port)

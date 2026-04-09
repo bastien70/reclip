@@ -66,6 +66,99 @@
       text-transform: uppercase;
     }
 
+    .tab-nav {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+    .tab-nav-btn {
+      padding: 9px 16px;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.74rem;
+      border: 1.5px solid var(--card-border);
+      border-radius: 10px;
+      background: var(--card);
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .tab-nav-btn:hover { color: var(--fg); border-color: var(--muted); }
+    .tab-nav-btn.active {
+      background: var(--fg);
+      color: var(--bg);
+      border-color: var(--fg);
+    }
+
+    .tab-panel { display: block; }
+    .tab-panel[hidden] { display: none !important; }
+
+    .lib-icon {
+      width: 120px;
+      min-width: 120px;
+      height: 80px;
+      border-radius: 8px;
+      background: var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+    .lib-icon svg { width: 32px; height: 32px; opacity: 0.7; }
+    .lib-icon.audio { color: var(--accent); }
+
+    .btn-danger {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 7px;
+      background: var(--error);
+      color: #fff;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.7rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .btn-danger:hover { filter: brightness(0.92); }
+    .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .settings-box {
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+      padding: 20px;
+    }
+    .settings-box label {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--fg);
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+    .settings-box input[type="number"] {
+      width: 100%;
+      max-width: 200px;
+      padding: 12px 14px;
+      border: 1.5px solid var(--card-border);
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.88rem;
+      outline: none;
+    }
+    .settings-box input[type="number"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(232, 93, 42, 0.08);
+    }
+    .settings-save-row { margin-top: 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    #settingsMsg { margin-top: 12px; }
+
     textarea {
       width: 100%;
       padding: 18px 20px;
@@ -368,6 +461,7 @@
     @media (max-width: 500px) {
       .brand h1 { font-size: 3rem; }
       .page { padding: 40px 16px 60px; }
+      .tab-nav-btn { flex: 1; min-width: 0; text-align: center; }
       .card { flex-direction: column; gap: 10px; }
       .card-thumb {
         width: 100%;
@@ -387,6 +481,13 @@
       <p>Free media downloader</p>
     </div>
 
+    <nav class="tab-nav" role="tablist" aria-label="Main">
+      <button type="button" class="tab-nav-btn active" data-tab="download" onclick="setMainTab('download')" role="tab" aria-selected="true">Download</button>
+      <button type="button" class="tab-nav-btn" data-tab="library" onclick="setMainTab('library')" role="tab" aria-selected="false">Library</button>
+      <button type="button" class="tab-nav-btn" data-tab="settings" onclick="setMainTab('settings')" role="tab" aria-selected="false">Settings</button>
+    </nav>
+
+    <div id="tab-download" class="tab-panel" role="tabpanel">
     <textarea id="urls" placeholder="Paste one or more URLs..." rows="2"></textarea>
     <p class="hint">Multiple links? Separate with spaces, commas, or newlines.</p>
 
@@ -399,6 +500,27 @@
     </div>
 
     <div id="cards" class="cards"></div>
+    </div>
+
+    <div id="tab-library" class="tab-panel" role="tabpanel" hidden>
+      <p class="hint">Files stored on the server. Save downloads a copy to this device; Delete removes from the server.</p>
+      <div id="libraryCards" class="cards"></div>
+      <div id="libraryToolbar" class="dl-all-bar" style="display: none;">
+        <button type="button" class="btn-danger" id="libraryDeleteAllBtn" onclick="deleteAllLibrary()">Delete all</button>
+      </div>
+    </div>
+
+    <div id="tab-settings" class="tab-panel" role="tabpanel" hidden>
+      <div class="settings-box">
+        <label for="autoDeleteDays">Auto-delete media after (days)</label>
+        <p class="hint">0 disables automatic cleanup. When enabled, files older than this are removed about every hour.</p>
+        <input type="number" id="autoDeleteDays" min="0" step="1" value="0" />
+        <div class="settings-save-row">
+          <button type="button" class="fetch-btn" id="settingsSaveBtn" onclick="saveSettings()">Save</button>
+        </div>
+        <p id="settingsMsg" class="hint" style="display: none;"></p>
+      </div>
+    </div>
 
     <div class="footer">
       YouTube &middot; TikTok &middot; Instagram &middot; Twitter/X &middot; Reddit &middot; Facebook<br>
@@ -410,6 +532,185 @@
   <script>
     let currentFormat = 'video';
     let cardData = [];
+
+    function setMainTab(tab) {
+      document.querySelectorAll('.tab-panel').forEach(p => {
+        if (p.id === 'tab-' + tab) {
+          p.removeAttribute('hidden');
+        } else {
+          p.setAttribute('hidden', '');
+        }
+      });
+      document.querySelectorAll('.tab-nav-btn').forEach(b => {
+        const on = b.dataset.tab === tab;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      if (tab === 'library') loadLibrary();
+      if (tab === 'settings') loadSettings();
+    }
+
+    function formatSize(bytes) {
+      const n = Number(bytes) || 0;
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+      return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    function relTime(mtimeSec) {
+      const ts = Number(mtimeSec) || 0;
+      const sec = Math.floor(Date.now() / 1000 - ts);
+      if (sec < 45) return 'just now';
+      const m = Math.floor(sec / 60);
+      if (m < 60) return m + ' min ago';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + ' h ago';
+      const d = Math.floor(h / 24);
+      if (d < 14) return d + ' day' + (d === 1 ? '' : 's') + ' ago';
+      return new Date(ts * 1000).toLocaleDateString();
+    }
+
+    function isAudioExt(ext) {
+      const e = (ext || '').toLowerCase();
+      return e === 'mp3' || e === 'm4a' || e === 'wav' || e === 'ogg' || e === 'opus' || e === 'aac';
+    }
+
+    function libThumbHtml(ext) {
+      if (isAudioExt(ext)) {
+        return '<div class="lib-icon audio"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>';
+      }
+      return '<div class="lib-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
+    }
+
+    async function loadLibrary() {
+      const container = document.getElementById('libraryCards');
+      const toolbar = document.getElementById('libraryToolbar');
+      const delAllBtn = document.getElementById('libraryDeleteAllBtn');
+      container.innerHTML = '<div class="card"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div>';
+      try {
+        const res = await fetch('/api/library');
+        const data = await res.json();
+        const files = data.files || [];
+        toolbar.style.display = files.length > 1 ? 'flex' : 'none';
+        if (!files.length) {
+          container.innerHTML = '<p class="hint">No files yet.</p>';
+          return;
+        }
+        container.innerHTML = files.map(f => `
+          <div class="card">
+            ${libThumbHtml(f.ext)}
+            <div class="card-body">
+              <div class="card-title" title="${esc(f.name)}">${esc(f.name)}</div>
+              <div class="card-meta">${esc(formatSize(f.size))} · ${esc(relTime(f.mtime))}</div>
+              <div class="card-actions">
+                <button type="button" class="card-dl-btn" onclick="librarySave(${JSON.stringify(f.name)})">Save</button>
+                <button type="button" class="btn-danger" onclick="libraryDelete(${JSON.stringify(f.name)})">Delete</button>
+              </div>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        container.innerHTML = '<p class="hint" style="color:var(--error)">Could not load library.</p>';
+        toolbar.style.display = 'none';
+      }
+    }
+
+    function librarySave(name) {
+      const a = document.createElement('a');
+      a.href = '/api/library/' + encodeURIComponent(name);
+      a.download = name;
+      a.click();
+    }
+
+    async function libraryDelete(name) {
+      if (!confirm('Delete this file from the server?')) return;
+      try {
+        const res = await fetch('/api/library/' + encodeURIComponent(name), { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert(err.error || 'Delete failed');
+          return;
+        }
+        loadLibrary();
+      } catch (e) {
+        alert(e.message || 'Delete failed');
+      }
+    }
+
+    async function deleteAllLibrary() {
+      const btn = document.getElementById('libraryDeleteAllBtn');
+      let files = [];
+      try {
+        const res = await fetch('/api/library');
+        const data = await res.json();
+        files = data.files || [];
+      } catch (e) {
+        alert('Could not list files');
+        return;
+      }
+      if (!files.length) return;
+      if (!confirm('Delete all ' + files.length + ' file(s) from the server?')) return;
+      btn.disabled = true;
+      try {
+        for (const f of files) {
+          await fetch('/api/library/' + encodeURIComponent(f.name), { method: 'DELETE' });
+        }
+        loadLibrary();
+      } catch (e) {
+        alert(e.message || 'Delete failed');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function loadSettings() {
+      const settingsMsg = document.getElementById('settingsMsg');
+      settingsMsg.style.display = 'none';
+      try {
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        const days = data.auto_delete_days ?? 0;
+        document.getElementById('autoDeleteDays').value = days;
+      } catch (e) {
+        document.getElementById('autoDeleteDays').value = 0;
+      }
+    }
+
+    async function saveSettings() {
+      const input = document.getElementById('autoDeleteDays');
+      const msg = document.getElementById('settingsMsg');
+      const btn = document.getElementById('settingsSaveBtn');
+      let days = parseInt(input.value, 10);
+      if (Number.isNaN(days) || days < 0) days = 0;
+      input.value = days;
+      btn.disabled = true;
+      msg.style.display = 'none';
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ auto_delete_days: days }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          msg.textContent = err.error || 'Save failed';
+          msg.style.color = 'var(--error)';
+          msg.style.display = 'block';
+          return;
+        }
+        msg.textContent = days === 0 ? 'Saved. Auto-delete is disabled.' : 'Saved. Files older than ' + days + ' day(s) will be removed periodically.';
+        msg.style.color = 'var(--success)';
+        msg.style.display = 'block';
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+      } catch (e) {
+        msg.textContent = e.message || 'Save failed';
+        msg.style.color = 'var(--error)';
+        msg.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+      }
+    }
 
     function setFormat(btn) {
       document.querySelectorAll('.pill').forEach(b => b.classList.remove('active'));

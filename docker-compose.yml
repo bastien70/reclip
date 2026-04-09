@@ -1,0 +1,17 @@
+# ReClip — démarrage : docker compose up -d
+# Téléchargements : ./downloads (créé automatiquement).
+# Paramètres : stockés dans le conteneur sous /app/settings.json (voir README pour persistance).
+# Port : PORT (défaut 8899) ou fichier .env, ex. PORT=9000
+
+services:
+  reclip:
+    build: .
+    container_name: reclip
+    ports:
+      - "${PORT:-8899}:${PORT:-8899}"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "${PORT:-8899}"
+    volumes:
+      - ./downloads:/app/downloads
+    restart: unless-stopped
