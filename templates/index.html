@@ -597,19 +597,24 @@
           container.innerHTML = '<p class="hint">No files yet.</p>';
           return;
         }
-        container.innerHTML = files.map(f => `
-          <div class="card">
-            ${libThumbHtml(f.ext)}
+        container.innerHTML = files.map((f, i) => {
+          const thumbHtml = f.thumbnail
+            ? `<div class="card-thumb"><img src="${esc(f.thumbnail)}" alt=""></div>`
+            : libThumbHtml(f.ext);
+          const title = f.title || f.name;
+          return `
+          <div class="card" data-lib-idx="${i}">
+            ${thumbHtml}
             <div class="card-body">
-              <div class="card-title" title="${esc(f.name)}">${esc(f.name)}</div>
+              <div class="card-title" title="${esc(title)}">${esc(title)}</div>
               <div class="card-meta">${esc(formatSize(f.size))} · ${esc(relTime(f.mtime))}</div>
               <div class="card-actions">
-                <button type="button" class="card-dl-btn" onclick="librarySave(${JSON.stringify(f.name)})">Save</button>
-                <button type="button" class="btn-danger" onclick="libraryDelete(${JSON.stringify(f.name)})">Delete</button>
+                <button type="button" class="card-dl-btn" onclick='librarySave(${JSON.stringify(f.name)})'>Save</button>
+                <button type="button" class="btn-danger" onclick='libraryDelete(${JSON.stringify(f.name)})'>Delete</button>
               </div>
             </div>
-          </div>
-        `).join('');
+          </div>`;
+        }).join('');
       } catch (e) {
         container.innerHTML = '<p class="hint" style="color:var(--error)">Could not load library.</p>';
         toolbar.style.display = 'none';
@@ -919,6 +924,9 @@
             format: currentFormat,
             format_id: c.selectedFormatId,
             title: c.title || '',
+            thumbnail: c.thumbnail || '',
+            uploader: c.uploader || '',
+            duration: c.duration || null,
           }),
         });
         const data = await res.json();

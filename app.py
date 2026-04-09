@@ -71,12 +71,17 @@ def cleanup_old_downloads():
     cutoff = time.time() - (days * 86400)
     try:
         for name in os.listdir(DOWNLOAD_DIR):
+            if name.endswith(".meta.json"):
+                continue
             path = safe_download_path(name)
             if not path or not os.path.isfile(path):
                 continue
             try:
                 if os.path.getmtime(path) < cutoff:
                     os.remove(path)
+                    meta_path = _meta_path_for(name)
+                    if os.path.isfile(meta_path):
+                        os.remove(meta_path)
             except OSError:
                 pass
     except OSError:
@@ -95,6 +100,41 @@ def cleanup_loop():
 def start_cleanup_thread():
     t = threading.Thread(target=cleanup_loop, daemon=True)
     t.start()
+
+
+def _meta_path_for(media_filename):
+    """Return path to the .meta.json sidecar for a given media file."""
+    stem = os.path.splitext(media_filename)[0]
+    return os.path.join(DOWNLOAD_DIR, stem + ".meta.json")
+
+
+def _write_meta(job_id, job):
+    """Persist metadata alongside the downloaded media file."""
+    meta = {
+        "title": job.get("title", ""),
+        "thumbnail": job.get("thumbnail", ""),
+        "uploader": job.get("uploader", ""),
+        "duration": job.get("duration"),
+        "filename": job.get("filename", ""),
+    }
+    path = os.path.join(DOWNLOAD_DIR, f"{job_id}.meta.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _read_meta(media_filename):
+    """Read the sidecar .meta.json for a media file; return dict or None."""
+    path = _meta_path_for(media_filename)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def run_download(job_id, url, format_choice, format_id):
@@ -143,12 +183,13 @@ def run_download(job_id, url, format_choice, format_id):
         job["file"] = chosen
         ext = os.path.splitext(chosen)[1]
         title = job.get("title", "").strip()
-        # Sanitize title for filename
         if title:
-            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
+            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:200].strip()
             job["filename"] = f"{safe_title}{ext}" if safe_title else os.path.basename(chosen)
         else:
             job["filename"] = os.path.basename(chosen)
+
+        _write_meta(job_id, job)
     except subprocess.TimeoutExpired:
         job["status"] = "error"
         job["error"] = "Download timed out (5 min limit)"
@@ -215,12 +256,22 @@ def start_download():
     format_choice = data.get("format", "video")
     format_id = data.get("format_id")
     title = data.get("title", "")
+    thumbnail = data.get("thumbnail", "")
+    uploader = data.get("uploader", "")
+    duration = data.get("duration")
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
     job_id = uuid.uuid4().hex[:10]
-    jobs[job_id] = {"status": "downloading", "url": url, "title": title}
+    jobs[job_id] = {
+        "status": "downloading",
+        "url": url,
+        "title": title,
+        "thumbnail": thumbnail,
+        "uploader": uploader,
+        "duration": duration,
+    }
 
     thread = threading.Thread(target=run_download, args=(job_id, url, format_choice, format_id))
     thread.daemon = True
@@ -257,6 +308,8 @@ def list_library():
     except OSError:
         return jsonify({"files": []})
     for name in names:
+        if name.endswith(".meta.json"):
+            continue
         path = safe_download_path(name)
         if not path or not os.path.isfile(path):
             continue
@@ -265,12 +318,20 @@ def list_library():
         except OSError:
             continue
         ext = os.path.splitext(name)[1].lower().lstrip(".")
-        items.append({
+        entry = {
             "name": name,
             "size": st.st_size,
             "mtime": int(st.st_mtime),
             "ext": ext,
-        })
+        }
+        meta = _read_meta(name)
+        if meta:
+            entry["title"] = meta.get("title", "")
+            entry["thumbnail"] = meta.get("thumbnail", "")
+            entry["uploader"] = meta.get("uploader", "")
+            entry["duration"] = meta.get("duration")
+            entry["display_name"] = meta.get("filename", "")
+        items.append(entry)
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return jsonify({"files": items})
 
@@ -280,7 +341,9 @@ def library_get_file(filename):
     path = safe_download_path(filename)
     if not path or not os.path.isfile(path):
         return jsonify({"error": "File not found"}), 404
-    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+    meta = _read_meta(filename)
+    dl_name = (meta.get("filename") if meta else None) or os.path.basename(path)
+    return send_file(path, as_attachment=True, download_name=dl_name)
 
 
 @app.route("/api/library/<filename>", methods=["DELETE"])
@@ -292,6 +355,12 @@ def library_delete_file(filename):
         os.remove(path)
     except OSError as e:
         return jsonify({"error": str(e)}), 500
+    meta_path = _meta_path_for(filename)
+    try:
+        if os.path.isfile(meta_path):
+            os.remove(meta_path)
+    except OSError:
+        pass
     return jsonify({"ok": True})
 
 
