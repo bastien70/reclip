@@ -1,0 +1,36 @@
+# Contexte Docker : tout ce qui suit est exclu du "transferring context"
+# (évite d'envoyer des Go de médias / venv au démon Docker).
+
+# Téléchargements ReClip (montés en volume au runtime, pas besoin dans l'image)
+downloads/
+
+# Environnements Python locaux
+venv/
+.venv/
+
+# Config locale (recréée dans le conteneur si besoin)
+settings.json
+
+# Cache Python / tests
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Git (inutile dans l'image)
+.git/
+
+# Fichiers lourds / assets de dev
+assets/*.mov
+
+# OS / éditeur
+.DS_Store
+.cursor/
+
+# Secrets locaux (jamais dans une image)
+.env
+.env.local
+.env.production
+.env.development
