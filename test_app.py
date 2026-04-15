@@ -381,6 +381,28 @@ def test_parse_progress_line_no_match():
     assert reclip_app._parse_progress_line("random text") is None
 
 
+def test_detect_phase_merger():
+    assert reclip_app._detect_phase("[Merger] Merging formats into ...") is not None
+    assert "Merging" in reclip_app._detect_phase("[Merger] Merging formats into ...")
+
+
+def test_detect_phase_ffmpeg():
+    result = reclip_app._detect_phase("[ffmpeg] Merging formats into ...")
+    assert result is not None
+    assert "Merging" in result
+
+
+def test_detect_phase_extract_audio():
+    result = reclip_app._detect_phase("[ExtractAudio] Destination: file.mp3")
+    assert result is not None
+    assert "Converting" in result
+
+
+def test_detect_phase_no_match():
+    assert reclip_app._detect_phase("[download] 42% of 10MiB") is None
+    assert reclip_app._detect_phase("[info] Extracting URL") is None
+
+
 # ---------------------------------------------------------------------------
 # /api/status includes progress fields
 # ---------------------------------------------------------------------------

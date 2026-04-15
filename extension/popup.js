@@ -170,27 +170,34 @@ function trunc(s, n) {
 function showInfoLoading() {
   const card = $("infoCard");
   const thumb = $("infoThumbWrap");
-  const body = $("infoBody");
-  card.className = "loading";
-  thumb.innerHTML = '<div class="skeleton" style="width:100%;height:100%"></div>';
-  body.innerHTML = '<div class="skel-line medium skeleton"></div><div class="skel-line short skeleton"></div>';
-}
-
-function showInfoCard(info) {
-  lastInfo = info;
-  selectedFormatId = info.formats?.[0]?.id || null;
-  const card = $("infoCard");
-  const thumb = $("infoThumbWrap");
   const title = $("infoTitle");
   const meta = $("infoMeta");
   const fmts = $("infoFormats");
+  card.className = "loading";
+  if (thumb) thumb.innerHTML = '<div class="skeleton" style="width:100%;height:100%"></div>';
+  if (title) title.innerHTML = '<div class="skel-line medium skeleton"></div>';
+  if (meta) meta.innerHTML = '<div class="skel-line short skeleton"></div>';
+  if (fmts) fmts.innerHTML = "";
+}
+
+function showInfoCard(info) {
+  const title = $("infoTitle");
+  const meta = $("infoMeta");
+  const fmts = $("infoFormats");
+  const thumb = $("infoThumbWrap");
+  const card = $("infoCard");
+  if (!title || !meta || !fmts || !thumb || !card) return;
+
+  lastInfo = info;
+  selectedFormatId = info.formats?.[0]?.id || null;
 
   card.className = "visible";
 
   if (info.thumbnail) {
     thumb.innerHTML = `<img src="${escapeHtml(info.thumbnail)}" alt="">`;
   } else {
-    thumb.innerHTML = '<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
+    thumb.innerHTML =
+      '<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
   }
 
   title.textContent = info.title || "Untitled";
@@ -218,9 +225,38 @@ function showInfoCard(info) {
 
 function hideInfoCard() {
   const card = $("infoCard");
-  card.className = "";
+  if (card) card.className = "";
   lastInfo = null;
   selectedFormatId = null;
+  const thumb = $("infoThumbWrap");
+  const title = $("infoTitle");
+  const meta = $("infoMeta");
+  const fmts = $("infoFormats");
+  if (thumb) thumb.innerHTML = "";
+  if (title) title.textContent = "";
+  if (meta) meta.textContent = "";
+  if (fmts) fmts.innerHTML = "";
+}
+
+/** When /api/info fails: keep a visible card so the popup does not look empty. */
+function showInfoFallback(detail) {
+  const card = $("infoCard");
+  const thumb = $("infoThumbWrap");
+  const title = $("infoTitle");
+  const meta = $("infoMeta");
+  const fmts = $("infoFormats");
+  if (!card || !thumb || !title || !meta || !fmts) return;
+  card.className = "visible";
+  lastInfo = null;
+  selectedFormatId = null;
+  thumb.innerHTML =
+    '<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
+  title.textContent = "Could not load video details";
+  const d = detail ? String(detail).trim() : "";
+  meta.textContent = d
+    ? trunc(d, 140)
+    : "You can still tap Download this page \u2014 ReClip will use yt-dlp on the tab URL.";
+  fmts.innerHTML = "";
 }
 
 async function fetchPageInfo(serverUrl, pageUrl) {
@@ -233,12 +269,13 @@ async function fetchPageInfo(serverUrl, pageUrl) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
-      hideInfoCard();
+      const errMsg = data.error ? String(data.error) : `HTTP ${res.status}`;
+      showInfoFallback(errMsg);
       return;
     }
     showInfoCard(data);
-  } catch {
-    hideInfoCard();
+  } catch (e) {
+    showInfoFallback(e && e.message ? e.message : "Network error \u2014 is the ReClip server reachable?");
   }
 }
 

@@ -235,6 +235,10 @@ def merge_job_from_ytdlp_metadata(job, meta):
 
 
 _PROGRESS_RE = re.compile(r"\[download\]\s+([\d.]+)%(?:\s+of\s+~?([\d.]+\S*))?")
+_DEST_RE = re.compile(r"\[download\] Destination:\s+(.+)")
+_PHASE_RE = re.compile(
+    r"\[(Merger|ffmpeg|ExtractAudio|FixupM3u8|FixupDuplicateMoov)\]", re.IGNORECASE
+)
 
 
 def _parse_progress_line(line):
@@ -250,13 +254,39 @@ def _parse_progress_line(line):
     return pct, txt
 
 
+def _detect_phase(line):
+    """Detect post-download phases (merge, convert). Return label or None."""
+    if _PHASE_RE.search(line):
+        low = line.lower()
+        if "extract" in low or "audio" in low:
+            return "Converting audio\u2026"
+        return "Merging\u2026"
+    return None
+
+
+def _detect_stream_label(line):
+    """Detect which stream is being downloaded (video/audio) from Destination line."""
+    m = _DEST_RE.search(line)
+    if not m:
+        return None
+    dest = m.group(1).lower()
+    if ".f" in dest:
+        parts = dest.rsplit(".f", 1)
+        if len(parts) == 2:
+            after = parts[1].split(".")[0]
+            return "video" if after else None
+    return None
+
+
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
     job["progress"] = 0
     job["progress_text"] = ""
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
+    info_json_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.info.json")
 
-    cmd = ["yt-dlp", "--no-playlist", "--newline", "-o", out_template]
+    cmd = ["yt-dlp", "--no-playlist", "--newline", "-o", out_template,
+           "--write-info-json"]
 
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
@@ -272,43 +302,83 @@ def run_download(job_id, url, format_choice, format_id):
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         last_line = ""
+        stream_count = 0
+        current_stream = ""
         for line in proc.stdout:
             last_line = line
+
+            phase = _detect_phase(line)
+            if phase:
+                job["progress_text"] = phase
+                continue
+
+            if "[download] Destination:" in line:
+                stream_count += 1
+                current_stream = "audio" if stream_count > 1 else "video"
+
+            if "[download] 100%" in line and stream_count <= 1:
+                current_stream = "audio"
+
             parsed = _parse_progress_line(line)
             if parsed:
+                prefix = ""
+                if format_choice != "audio" and format_id:
+                    prefix = f"({current_stream or 'video'}) " if current_stream else ""
                 job["progress"] = parsed[0]
-                job["progress_text"] = parsed[1]
+                job["progress_text"] = f"{prefix}{parsed[1]}"
 
-        returncode = proc.wait(timeout=300)
+        returncode = proc.wait(timeout=600)
         if returncode != 0:
             job["status"] = "error"
             job["error"] = last_line.strip() or "Download failed"
             return
 
+        # Read metadata from the sidecar .info.json written by yt-dlp
+        info_json_data = None
+        if os.path.isfile(info_json_template):
+            try:
+                with open(info_json_template, encoding="utf-8") as f:
+                    info_json_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{job_id}.*"))
-        if not files:
+        media_files = [
+            f for f in files
+            if not f.endswith(".meta.json") and not f.endswith(".info.json")
+        ]
+        if not media_files:
             job["status"] = "error"
             job["error"] = "Download completed but no file was found"
             return
 
         if format_choice == "audio":
-            target = [f for f in files if f.endswith(".mp3")]
-            chosen = target[0] if target else files[0]
+            target = [f for f in media_files if f.endswith(".mp3")]
+            chosen = target[0] if target else media_files[0]
         else:
-            target = [f for f in files if f.endswith(".mp4")]
-            chosen = target[0] if target else files[0]
+            target = [f for f in media_files if f.endswith(".mp4")]
+            chosen = target[0] if target else media_files[0]
 
-        for f in files:
+        for f in media_files:
             if f != chosen:
                 try:
                     os.remove(f)
                 except OSError:
                     pass
 
-        if not str(job.get("title") or "").strip():
-            info_json = fetch_ytdlp_json(url)
-            if info_json:
-                merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(info_json))
+        # Clean up the .info.json sidecar (we already read it)
+        if os.path.isfile(info_json_template):
+            try:
+                os.remove(info_json_template)
+            except OSError:
+                pass
+
+        if info_json_data:
+            merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(info_json_data))
+        elif not str(job.get("title") or "").strip():
+            fetched = fetch_ytdlp_json(url)
+            if fetched:
+                merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(fetched))
 
         job["status"] = "done"
         job["progress"] = 100
@@ -329,7 +399,7 @@ def run_download(job_id, url, format_choice, format_id):
         except Exception:
             pass
         job["status"] = "error"
-        job["error"] = "Download timed out (5 min limit)"
+        job["error"] = "Download timed out (10 min limit)"
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
