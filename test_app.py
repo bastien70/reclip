@@ -353,6 +353,66 @@ def test_merge_job_from_ytdlp_metadata_preserves_client_title():
 
 
 # ---------------------------------------------------------------------------
+# Progress parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_progress_line_standard():
+    pct, txt = reclip_app._parse_progress_line("[download]  42.3% of 12.5MiB at 2.1MiB/s ETA 00:04")
+    assert abs(pct - 42.3) < 0.01
+    assert "42.3%" in txt
+    assert "12.5MiB" in txt
+
+
+def test_parse_progress_line_100():
+    pct, txt = reclip_app._parse_progress_line("[download] 100% of 5.00MiB")
+    assert pct == 100.0
+    assert "100" in txt
+
+
+def test_parse_progress_line_approximate_size():
+    pct, txt = reclip_app._parse_progress_line("[download]  10.0% of ~50.00MiB at 3.0MiB/s")
+    assert abs(pct - 10.0) < 0.01
+    assert "50.00MiB" in txt
+
+
+def test_parse_progress_line_no_match():
+    assert reclip_app._parse_progress_line("[info] Extracting URL") is None
+    assert reclip_app._parse_progress_line("random text") is None
+
+
+# ---------------------------------------------------------------------------
+# /api/status includes progress fields
+# ---------------------------------------------------------------------------
+
+
+def test_status_returns_progress(client, isolated_dirs):
+    reclip_app.jobs["test42"] = {
+        "status": "downloading",
+        "progress": 55.5,
+        "progress_text": "55.5% of 10MiB",
+    }
+    rv = client.get("/api/status/test42")
+    data = rv.get_json()
+    assert data["status"] == "downloading"
+    assert data["progress"] == 55.5
+    assert data["progress_text"] == "55.5% of 10MiB"
+
+
+def test_status_done_has_progress_100(client, isolated_dirs):
+    reclip_app.jobs["done1"] = {
+        "status": "done",
+        "progress": 100,
+        "progress_text": "100%",
+        "filename": "video.mp4",
+    }
+    rv = client.get("/api/status/done1")
+    data = rv.get_json()
+    assert data["progress"] == 100
+    assert data["filename"] == "video.mp4"
+
+
+# ---------------------------------------------------------------------------
 # CORS (browser extension)
 # ---------------------------------------------------------------------------
 

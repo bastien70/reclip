@@ -874,7 +874,8 @@
       if (c.status === 'ready') {
         actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>${qualityChips}`;
       } else if (c.status === 'downloading') {
-        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Downloading...</span>`;
+        const pText = c.progress_text ? ` ${esc(c.progress_text)}` : '';
+        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Downloading${pText}</span>`;
       } else if (c.status === 'done') {
         actionHtml = `<button class="card-dl-btn done" onclick="saveCard(${idx})">Save</button>
           <span class="card-status done">${esc(c.filename || '')}</span>`;
@@ -961,6 +962,9 @@
             clearInterval(iv);
             c.status = 'error';
             c.error = data.error;
+            renderCard(idx);
+          } else if (data.status === 'downloading') {
+            c.progress_text = data.progress_text || '';
             renderCard(idx);
           }
         } catch {

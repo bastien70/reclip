@@ -1,9 +1,11 @@
 const STORAGE_KEY = "reclipServerUrl";
 
-/** @type {boolean} */
 let streamsExpanded = false;
-/** @type {number} */
 let lastStreamCount = 0;
+let lastInfo = null;
+let selectedFormatId = null;
+let currentTabId = null;
+let currentPageUrl = "";
 
 function $(id) {
   return document.getElementById(id);
@@ -23,12 +25,9 @@ function showStatus(text, kind, loading) {
 }
 
 function setDownloadUiBusy(busy) {
-  document.querySelectorAll(".dl-row-btn").forEach((b) => {
-    b.disabled = busy;
-  });
-  document.querySelectorAll("#formatPills .pill").forEach((b) => {
-    b.disabled = busy;
-  });
+  document.querySelectorAll(".dl-row-btn").forEach((b) => (b.disabled = busy));
+  document.querySelectorAll("#formatPills .pill").forEach((b) => (b.disabled = busy));
+  document.querySelectorAll("#infoFormats .q-chip").forEach((b) => (b.disabled = busy));
   const t = $("btnToggleStreams");
   if (t) t.disabled = busy;
 }
@@ -66,6 +65,13 @@ function currentFormat() {
   return active ? active.dataset.format : "video";
 }
 
+function fmtDur(s) {
+  if (!s) return "";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
 async function apiDownload(serverUrl, body) {
   const res = await fetch(`${serverUrl}/api/download`, {
     method: "POST",
@@ -77,34 +83,15 @@ async function apiDownload(serverUrl, body) {
   return data;
 }
 
-async function pollUntilDone(serverUrl, jobId) {
-  const max = 600;
-  for (let i = 0; i < max; i++) {
-    const res = await fetch(`${serverUrl}/api/status/${jobId}`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "Status failed");
-    if (data.status === "done") return data;
-    if (data.status === "error") throw new Error(data.error || "Download failed");
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error("Timeout waiting for download");
-}
-
 async function triggerBrowserDownload(serverUrl, jobId, filename) {
   const url = `${serverUrl}/api/file/${jobId}`;
-  await chrome.downloads.download({
-    url,
-    filename: filename || undefined,
-    saveAs: false,
-  });
+  await chrome.downloads.download({ url, filename: filename || undefined, saveAs: false });
 }
 
 function pickDownloadUrl(streams, pageUrl) {
   if (!streams || !streams.length) return pageUrl;
   const net = streams.find(
-    (s) =>
-      s.kind === "network" &&
-      /\.(m3u8|mpd|mp4|webm|m4v)(\?|$|#)/i.test(s.url)
+    (s) => s.kind === "network" && /\.(m3u8|mpd|mp4|webm|m4v)(\?|$|#)/i.test(s.url)
   );
   if (net) return net.url;
   return pageUrl;
@@ -127,32 +114,23 @@ function dedupeKey(url) {
 
 function humanLabel(kind, url) {
   let host = "";
-  try {
-    host = new URL(url).hostname.replace(/^www\./, "");
-  } catch {}
+  try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
   const k = (kind || "").toLowerCase();
   if (k === "embed") {
-    if (url.includes("youtube.com") || url.includes("youtu.be")) return "Embed · YouTube";
-    if (url.includes("vimeo.com")) return "Embed · Vimeo";
-    return host ? `Embed · ${host}` : "Embed";
+    if (url.includes("youtube.com") || url.includes("youtu.be")) return "Embed \u00b7 YouTube";
+    if (url.includes("vimeo.com")) return "Embed \u00b7 Vimeo";
+    return host ? `Embed \u00b7 ${host}` : "Embed";
   }
-  const map = {
-    page: "Page",
-    video: "Video",
-    source: "Source",
-    network: "Stream",
-    embed: "Embed",
-    dom: "Item",
-  };
+  const map = { page: "Page", video: "Video", source: "Source", network: "Stream", embed: "Embed", dom: "Item" };
   const t = map[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : "Item");
-  return host ? `${t} · ${host}` : t;
+  return host ? `${t} \u00b7 ${host}` : t;
 }
 
 function shortUrlPreview(url) {
   try {
     const u = new URL(url);
     let path = u.pathname + u.search;
-    if (path.length > 64) path = path.slice(0, 62) + "…";
+    if (path.length > 64) path = path.slice(0, 62) + "\u2026";
     return u.hostname + path;
   } catch {
     return trunc(url, 80);
@@ -168,15 +146,105 @@ function prepareStreams(streams) {
     if (key === null) continue;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({
-      ...s,
-      displayLine: humanLabel(s.kind, s.url),
-      urlPreview: shortUrlPreview(s.url),
-    });
+    out.push({ ...s, displayLine: humanLabel(s.kind, s.url), urlPreview: shortUrlPreview(s.url) });
     if (out.length >= 5) break;
   }
   return out;
 }
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s || "";
+  return d.innerHTML;
+}
+
+function trunc(s, n) {
+  if (!s) return "";
+  return s.length <= n ? s : s.slice(0, n) + "\u2026";
+}
+
+// ---------------------------------------------------------------------------
+// Info card (auto-fetch /api/info)
+// ---------------------------------------------------------------------------
+
+function showInfoLoading() {
+  const card = $("infoCard");
+  const thumb = $("infoThumbWrap");
+  const body = $("infoBody");
+  card.className = "loading";
+  thumb.innerHTML = '<div class="skeleton" style="width:100%;height:100%"></div>';
+  body.innerHTML = '<div class="skel-line medium skeleton"></div><div class="skel-line short skeleton"></div>';
+}
+
+function showInfoCard(info) {
+  lastInfo = info;
+  selectedFormatId = info.formats?.[0]?.id || null;
+  const card = $("infoCard");
+  const thumb = $("infoThumbWrap");
+  const title = $("infoTitle");
+  const meta = $("infoMeta");
+  const fmts = $("infoFormats");
+
+  card.className = "visible";
+
+  if (info.thumbnail) {
+    thumb.innerHTML = `<img src="${escapeHtml(info.thumbnail)}" alt="">`;
+  } else {
+    thumb.innerHTML = '<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
+  }
+
+  title.textContent = info.title || "Untitled";
+  title.title = info.title || "";
+
+  const parts = [];
+  if (info.uploader) parts.push(info.uploader);
+  if (info.duration) parts.push(fmtDur(info.duration));
+  meta.textContent = parts.join(" \u00b7 ");
+
+  if (info.formats && info.formats.length > 1) {
+    fmts.innerHTML = info.formats
+      .map((f) => `<button type="button" class="q-chip${f.id === selectedFormatId ? " active" : ""}" data-fid="${escapeHtml(f.id)}">${escapeHtml(f.label)}</button>`)
+      .join("");
+    fmts.querySelectorAll(".q-chip").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedFormatId = btn.dataset.fid;
+        fmts.querySelectorAll(".q-chip").forEach((b) => b.classList.toggle("active", b.dataset.fid === selectedFormatId));
+      });
+    });
+  } else {
+    fmts.innerHTML = "";
+  }
+}
+
+function hideInfoCard() {
+  const card = $("infoCard");
+  card.className = "";
+  lastInfo = null;
+  selectedFormatId = null;
+}
+
+async function fetchPageInfo(serverUrl, pageUrl) {
+  showInfoLoading();
+  try {
+    const res = await fetch(`${serverUrl}/api/info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: pageUrl }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      hideInfoCard();
+      return;
+    }
+    showInfoCard(data);
+  } catch {
+    hideInfoCard();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Download
+// ---------------------------------------------------------------------------
 
 async function runDownload(targetUrl) {
   const serverUrl = await getServerUrl();
@@ -184,37 +252,86 @@ async function runDownload(targetUrl) {
     showStatus("Configure server URL first.", "error", false);
     return;
   }
-  showStatus("Sending to ReClip…", "", true);
+  showStatus("Sending to ReClip\u2026", "", true);
   const btnDl = $("btnDownloadPage");
   const btnPaste = $("btnPasteSend");
   if (btnDl) btnDl.disabled = true;
   if (btnPaste) btnPaste.disabled = true;
   setDownloadUiBusy(true);
+
+  const fmt = currentFormat();
+  const body = {
+    url: targetUrl,
+    format: fmt === "audio" ? "audio" : "video",
+    format_id: selectedFormatId || undefined,
+    title: lastInfo?.title || "",
+    thumbnail: lastInfo?.thumbnail || "",
+    uploader: lastInfo?.uploader || "",
+    duration: lastInfo?.duration || null,
+  };
+
   try {
-    const fmt = currentFormat();
-    const data = await apiDownload(serverUrl, {
-      url: targetUrl,
-      format: fmt === "audio" ? "audio" : "video",
-      title: "",
-      thumbnail: "",
-      uploader: "",
-      duration: null,
-    });
+    const data = await apiDownload(serverUrl, body);
     const jobId = data.job_id;
     if (!jobId) throw new Error("No job_id");
-    showStatus("Downloading on server…", "", true);
-    const st = await pollUntilDone(serverUrl, jobId);
-    showStatus("Saving to device…", "", true);
-    await triggerBrowserDownload(serverUrl, jobId, st.filename);
-    showStatus("Done.", "ok", false);
+
+    chrome.runtime.sendMessage({
+      type: "RECLIP_START_JOB",
+      tabId: currentTabId,
+      jobId,
+      serverUrl,
+      url: targetUrl,
+      title: body.title,
+      thumbnail: body.thumbnail,
+    });
+
+    showStatus("Downloading\u2026", "", true);
+    startLocalPolling(serverUrl, jobId);
   } catch (e) {
     showStatus(e.message || String(e), "error", false);
-  } finally {
     if (btnDl) btnDl.disabled = false;
     if (btnPaste) btnPaste.disabled = false;
     setDownloadUiBusy(false);
   }
 }
+
+function startLocalPolling(serverUrl, jobId) {
+  const iv = setInterval(async () => {
+    try {
+      const res = await fetch(`${serverUrl}/api/status/${jobId}`);
+      const data = await res.json().catch(() => ({}));
+      if (data.status === "done") {
+        clearInterval(iv);
+        showStatus("Saving to device\u2026", "", true);
+        await triggerBrowserDownload(serverUrl, jobId, data.filename);
+        showStatus("Done.", "ok", false);
+        finishDownloadUi();
+      } else if (data.status === "error") {
+        clearInterval(iv);
+        showStatus(data.error || "Download failed", "error", false);
+        finishDownloadUi();
+      } else if (data.progress_text) {
+        showStatus(`Downloading\u2026 ${data.progress_text}`, "", true);
+      }
+    } catch {
+      clearInterval(iv);
+      showStatus("Lost connection to server", "error", false);
+      finishDownloadUi();
+    }
+  }, 1000);
+}
+
+function finishDownloadUi() {
+  const btnDl = $("btnDownloadPage");
+  const btnPaste = $("btnPasteSend");
+  if (btnDl) btnDl.disabled = false;
+  if (btnPaste) btnPaste.disabled = false;
+  setDownloadUiBusy(false);
+}
+
+// ---------------------------------------------------------------------------
+// Streams toggle
+// ---------------------------------------------------------------------------
 
 function updateStreamsToggleUi() {
   const btn = $("btnToggleStreams");
@@ -251,7 +368,7 @@ function renderStreams(streams, pageUrl) {
   updateStreamsToggleUi();
 
   if (!prepared.length) {
-    list.innerHTML = '<p class="hint">Nothing to list (or only page URL — use Download this page).</p>';
+    list.innerHTML = '<p class="hint">Nothing to list.</p>';
     return;
   }
 
@@ -270,8 +387,7 @@ function renderStreams(streams, pageUrl) {
     btn.textContent = "DL";
     btn.title = s.url;
     btn.addEventListener("click", () => {
-      const u =
-        s.kind === "network" && /\.(m3u8|mpd|mp4|webm|m4v)(\?|$|#)/i.test(s.url) ? s.url : pageUrl;
+      const u = s.kind === "network" && /\.(m3u8|mpd|mp4|webm|m4v)(\?|$|#)/i.test(s.url) ? s.url : pageUrl;
       runDownload(u);
     });
 
@@ -281,33 +397,69 @@ function renderStreams(streams, pageUrl) {
   });
 }
 
-function escapeHtml(s) {
-  const d = document.createElement("div");
-  d.textContent = s || "";
-  return d.innerHTML;
+// ---------------------------------------------------------------------------
+// Restore active job from background
+// ---------------------------------------------------------------------------
+
+async function restoreActiveJob() {
+  if (!currentTabId) return;
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "RECLIP_GET_JOB", tabId: currentTabId }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !resp.job) {
+        resolve(false);
+        return;
+      }
+      const j = resp.job;
+      if (j.status === "downloading") {
+        showStatus(j.progress_text ? `Downloading\u2026 ${j.progress_text}` : "Downloading\u2026", "", true);
+        const btnDl = $("btnDownloadPage");
+        const btnPaste = $("btnPasteSend");
+        if (btnDl) btnDl.disabled = true;
+        if (btnPaste) btnPaste.disabled = true;
+        setDownloadUiBusy(true);
+        startLocalPolling(j.serverUrl, j.jobId);
+        resolve(true);
+      } else if (j.status === "done") {
+        showStatus("Done.", "ok", false);
+        triggerBrowserDownload(j.serverUrl, j.jobId, j.filename);
+        resolve(true);
+      } else if (j.status === "error") {
+        showStatus(j.error || "Download failed", "error", false);
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+  });
 }
 
-function trunc(s, n) {
-  if (!s) return "";
-  return s.length <= n ? s : s.slice(0, n) + "…";
-}
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 
 async function refreshStreams() {
   const serverUrl = await getServerUrl();
   $("serverHint").textContent = serverUrl ? `Server: ${serverUrl}` : "";
 
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
     const tab = tabs[0];
     if (!tab || !tab.id) return;
-    const pageUrl = tab.url || "";
+    currentTabId = tab.id;
+    currentPageUrl = tab.url || "";
+
     chrome.runtime.sendMessage({ type: "RECLIP_GET_STREAMS", tabId: tab.id }, (resp) => {
       const streams = (resp && resp.streams) || [];
-      renderStreams(streams, pageUrl);
+      renderStreams(streams, currentPageUrl);
       const btnDl = $("btnDownloadPage");
       if (btnDl) {
-        btnDl.onclick = () => runDownload(pickDownloadUrl(streams, pageUrl));
+        btnDl.onclick = () => runDownload(pickDownloadUrl(streams, currentPageUrl));
       }
     });
+
+    const restored = await restoreActiveJob();
+    if (!restored && serverUrl && currentPageUrl.startsWith("http")) {
+      fetchPageInfo(serverUrl, currentPageUrl);
+    }
   });
 }
 

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import uuid
 import glob
@@ -233,11 +234,29 @@ def merge_job_from_ytdlp_metadata(job, meta):
         job["duration"] = meta["duration"]
 
 
+_PROGRESS_RE = re.compile(r"\[download\]\s+([\d.]+)%(?:\s+of\s+~?([\d.]+\S*))?")
+
+
+def _parse_progress_line(line):
+    """Return (percent_float, text_summary) or None."""
+    m = _PROGRESS_RE.search(line)
+    if not m:
+        return None
+    pct = float(m.group(1))
+    size = m.group(2) or ""
+    txt = f"{pct:.1f}%"
+    if size:
+        txt += f" of {size}"
+    return pct, txt
+
+
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
+    job["progress"] = 0
+    job["progress_text"] = ""
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
 
-    cmd = ["yt-dlp", "--no-playlist", "-o", out_template]
+    cmd = ["yt-dlp", "--no-playlist", "--newline", "-o", out_template]
 
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
@@ -249,10 +268,21 @@ def run_download(job_id, url, format_choice, format_id):
     cmd.append(url)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        last_line = ""
+        for line in proc.stdout:
+            last_line = line
+            parsed = _parse_progress_line(line)
+            if parsed:
+                job["progress"] = parsed[0]
+                job["progress_text"] = parsed[1]
+
+        returncode = proc.wait(timeout=300)
+        if returncode != 0:
             job["status"] = "error"
-            job["error"] = result.stderr.strip().split("\n")[-1]
+            job["error"] = last_line.strip() or "Download failed"
             return
 
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{job_id}.*"))
@@ -275,11 +305,14 @@ def run_download(job_id, url, format_choice, format_id):
                 except OSError:
                     pass
 
-        info_json = fetch_ytdlp_json(url)
-        if info_json:
-            merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(info_json))
+        if not str(job.get("title") or "").strip():
+            info_json = fetch_ytdlp_json(url)
+            if info_json:
+                merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(info_json))
 
         job["status"] = "done"
+        job["progress"] = 100
+        job["progress_text"] = "100%"
         job["file"] = chosen
         ext = os.path.splitext(chosen)[1]
         title = job.get("title", "").strip()
@@ -291,6 +324,10 @@ def run_download(job_id, url, format_choice, format_id):
 
         _write_meta(job_id, job)
     except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
         job["status"] = "error"
         job["error"] = "Download timed out (5 min limit)"
     except Exception as e:
@@ -389,6 +426,8 @@ def check_status(job_id):
         "status": job["status"],
         "error": job.get("error"),
         "filename": job.get("filename"),
+        "progress": job.get("progress"),
+        "progress_text": job.get("progress_text"),
     })
 
 
