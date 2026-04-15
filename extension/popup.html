@@ -183,6 +183,49 @@
       margin-bottom: 6px;
     }
     .stream-row .stream-item { flex: 1; margin-bottom: 0; }
+
+    .tab-row {
+      display: flex;
+      gap: 0;
+      margin-bottom: 12px;
+      border-bottom: 1.5px solid var(--border);
+    }
+    .tab-row button.tab {
+      flex: 1;
+      padding: 8px 10px;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 8px 8px 0 0;
+      font-weight: 600;
+      font-size: 0.78rem;
+    }
+    .tab-row button.tab:hover { filter: none; color: var(--fg); }
+    .tab-row button.tab.active {
+      color: var(--fg);
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-bottom-color: var(--card);
+      margin-bottom: -1.5px;
+    }
+    #panel-jobs { max-height: 380px; overflow-y: auto; }
+    .job-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      padding: 8px 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 0.72rem;
+    }
+    .job-row-main { flex: 1; min-width: 0; }
+    .job-title { font-weight: 600; color: var(--fg); margin-bottom: 2px; word-break: break-word; }
+    .job-meta { color: var(--muted); font-size: 0.68rem; line-height: 1.3; }
+    .job-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+    .job-actions .small { white-space: nowrap; }
+    #statusRow .cancel-inline { margin-left: auto; flex-shrink: 0; }
+    button.cancel-dl { background: var(--fg); font-size: 0.72rem; padding: 4px 10px; }
   </style>
 </head>
 <body>
@@ -202,6 +245,12 @@
     </div>
     <p class="hint" id="serverHint"></p>
 
+    <div class="tab-row" role="tablist">
+      <button type="button" class="tab active" id="tabMain" role="tab" aria-selected="true">This page</button>
+      <button type="button" class="tab" id="tabJobs" role="tab" aria-selected="false">Jobs</button>
+    </div>
+
+    <div id="panel-main">
     <div class="section">
       <label>Format</label>
       <div class="pill-group" id="formatPills">
@@ -240,6 +289,14 @@
     <div id="statusRow" aria-live="polite">
       <span class="spinner hidden" id="statusSpinner" role="status"></span>
       <span id="status"></span>
+      <button type="button" class="small cancel-dl cancel-inline hidden" id="btnCancelDownload">Cancel</button>
+    </div>
+    </div>
+
+    <div id="panel-jobs" class="hidden">
+      <p class="hint">All download jobs on this browser. Cancel stops the server task.</p>
+      <button type="button" class="secondary small" id="btnRefreshJobs" style="margin-bottom:8px;">Refresh</button>
+      <div id="jobsList"></div>
     </div>
   </div>
 

@@ -278,10 +278,20 @@ def _detect_stream_label(line):
     return None
 
 
+def _cleanup_partial_job_files(job_id):
+    """Remove all files in DOWNLOAD_DIR for this job id (partial download / cancel)."""
+    for path in glob.glob(os.path.join(DOWNLOAD_DIR, f"{job_id}.*")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
     job["progress"] = 0
     job["progress_text"] = ""
+    job["cancelled"] = False
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
     info_json_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.info.json")
 
@@ -301,10 +311,13 @@ def run_download(job_id, url, format_choice, format_id):
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
+        job["proc"] = proc
         last_line = ""
         stream_count = 0
         current_stream = ""
         for line in proc.stdout:
+            if job.get("cancelled"):
+                break
             last_line = line
 
             phase = _detect_phase(line)
@@ -327,7 +340,24 @@ def run_download(job_id, url, format_choice, format_id):
                 job["progress"] = parsed[0]
                 job["progress_text"] = f"{prefix}{parsed[1]}"
 
+        if job.get("cancelled"):
+            job["status"] = "cancelled"
+            job["error"] = "Cancelled by user"
+            job["progress_text"] = ""
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                pass
+            job.pop("proc", None)
+            _cleanup_partial_job_files(job_id)
+            return
+
         returncode = proc.wait(timeout=600)
+        job.pop("proc", None)
         if returncode != 0:
             job["status"] = "error"
             job["error"] = last_line.strip() or "Download failed"
@@ -398,9 +428,11 @@ def run_download(job_id, url, format_choice, format_id):
             proc.kill()
         except Exception:
             pass
+        job.pop("proc", None)
         job["status"] = "error"
         job["error"] = "Download timed out (10 min limit)"
     except Exception as e:
+        job.pop("proc", None)
         job["status"] = "error"
         job["error"] = str(e)
 
@@ -499,6 +531,23 @@ def check_status(job_id):
         "progress": job.get("progress"),
         "progress_text": job.get("progress_text"),
     })
+
+
+@app.route("/api/cancel/<job_id>", methods=["POST"])
+def cancel_job(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job["status"] != "downloading":
+        return jsonify({"ok": True, "already": job["status"]})
+    job["cancelled"] = True
+    proc = job.get("proc")
+    if proc:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    return jsonify({"ok": True})
 
 
 @app.route("/api/file/<job_id>")

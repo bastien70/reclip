@@ -435,6 +435,31 @@ def test_status_done_has_progress_100(client, isolated_dirs):
 
 
 # ---------------------------------------------------------------------------
+# /api/cancel
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_unknown_job(client):
+    rv = client.post("/api/cancel/notarealid")
+    assert rv.status_code == 404
+
+
+def test_cancel_already_finished(client, isolated_dirs):
+    reclip_app.jobs["fin1"] = {"status": "done", "filename": "x.mp4"}
+    rv = client.post("/api/cancel/fin1")
+    assert rv.status_code == 200
+    assert rv.get_json()["already"] == "done"
+
+
+def test_cancel_sets_flag_on_downloading_job(client, isolated_dirs):
+    reclip_app.jobs["dl1"] = {"status": "downloading", "proc": None}
+    rv = client.post("/api/cancel/dl1")
+    assert rv.status_code == 200
+    assert rv.get_json()["ok"] is True
+    assert reclip_app.jobs["dl1"]["cancelled"] is True
+
+
+# ---------------------------------------------------------------------------
 # CORS (browser extension)
 # ---------------------------------------------------------------------------
 

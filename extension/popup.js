@@ -1,4 +1,76 @@
 const STORAGE_KEY = "reclipServerUrl";
+const JOBS_KEY = "reclipJobs";
+
+function migrateJobsMap(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const keys = Object.keys(raw);
+  if (keys.length === 0) return {};
+  const firstKey = keys[0];
+  const first = raw[firstKey];
+  if (!first || typeof first !== "object" || !first.jobId) return raw;
+  if (firstKey === first.jobId) return raw;
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v && v.jobId) {
+      out[v.jobId] = {
+        ...v,
+        tabId: v.tabId != null ? v.tabId : /^\d+$/.test(String(k)) ? Number(k) : k,
+      };
+    }
+  }
+  return out;
+}
+
+function persistJobPatch(jobId, patch) {
+  if (!jobId) return Promise.resolve();
+  return new Promise((resolve) => {
+    chrome.storage.local.get(JOBS_KEY, (r) => {
+      const map = migrateJobsMap(r[JOBS_KEY] || {});
+      const prev = map[jobId] || {};
+      map[jobId] = { ...prev, ...patch, jobId, updatedAt: Date.now() };
+      chrome.storage.local.set({ [JOBS_KEY]: map }, resolve);
+    });
+  });
+}
+
+function getJobEntryByJobId(jobId) {
+  return new Promise((resolve) => {
+    if (!jobId) {
+      resolve(null);
+      return;
+    }
+    chrome.storage.local.get(JOBS_KEY, (r) => {
+      const map = migrateJobsMap(r[JOBS_KEY] || {});
+      resolve(map[jobId] || null);
+    });
+  });
+}
+
+function removeJobFromStorage(jobId) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(JOBS_KEY, (r) => {
+      const map = migrateJobsMap(r[JOBS_KEY] || {});
+      delete map[jobId];
+      chrome.storage.local.set({ [JOBS_KEY]: map }, resolve);
+    });
+  });
+}
+
+/** Prefer newest active download for this tab, else most recent job. */
+function pickPrimaryJobForTab(map, tabId) {
+  const tid = String(tabId);
+  const list = Object.entries(map).filter(([, j]) => String(j.tabId) === tid);
+  const downloading = list.filter(([, j]) => j.status === "downloading");
+  if (downloading.length) {
+    downloading.sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0));
+    return { jobId: downloading[0][0], ...downloading[0][1] };
+  }
+  const sorted = list.sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0));
+  return sorted[0] ? { jobId: sorted[0][0], ...sorted[0][1] } : null;
+}
+
+/** @type {string | null} */
+let currentPollingJobId = null;
 
 let streamsExpanded = false;
 let lastStreamCount = 0;
@@ -6,6 +78,8 @@ let lastInfo = null;
 let selectedFormatId = null;
 let currentTabId = null;
 let currentPageUrl = "";
+/** @type {ReturnType<typeof setInterval> | null} */
+let statusPollInterval = null;
 
 function $(id) {
   return document.getElementById(id);
@@ -180,7 +254,7 @@ function showInfoLoading() {
   if (fmts) fmts.innerHTML = "";
 }
 
-function showInfoCard(info) {
+function showInfoCard(info, preferredFormatId) {
   const title = $("infoTitle");
   const meta = $("infoMeta");
   const fmts = $("infoFormats");
@@ -189,7 +263,11 @@ function showInfoCard(info) {
   if (!title || !meta || !fmts || !thumb || !card) return;
 
   lastInfo = info;
-  selectedFormatId = info.formats?.[0]?.id || null;
+  if (preferredFormatId != null && preferredFormatId !== "") {
+    selectedFormatId = preferredFormatId;
+  } else {
+    selectedFormatId = info.formats?.[0]?.id || null;
+  }
 
   card.className = "visible";
 
@@ -216,11 +294,26 @@ function showInfoCard(info) {
       btn.addEventListener("click", () => {
         selectedFormatId = btn.dataset.fid;
         fmts.querySelectorAll(".q-chip").forEach((b) => b.classList.toggle("active", b.dataset.fid === selectedFormatId));
+        persistPageInfo();
       });
     });
   } else {
     fmts.innerHTML = "";
   }
+}
+
+function persistPageInfo() {
+  if (!currentTabId || !currentPageUrl || !lastInfo) return;
+  const PAGE_INFO_KEY = "reclipPageInfo";
+  chrome.storage.local.get(PAGE_INFO_KEY, (r) => {
+    const map = r[PAGE_INFO_KEY] || {};
+    map[String(currentTabId)] = {
+      pageUrl: currentPageUrl,
+      info: lastInfo,
+      selectedFormatId: selectedFormatId || null,
+    };
+    chrome.storage.local.set({ [PAGE_INFO_KEY]: map });
+  });
 }
 
 function hideInfoCard() {
@@ -274,6 +367,7 @@ async function fetchPageInfo(serverUrl, pageUrl) {
       return;
     }
     showInfoCard(data);
+    persistPageInfo();
   } catch (e) {
     showInfoFallback(e && e.message ? e.message : "Network error \u2014 is the ReClip server reachable?");
   }
@@ -312,6 +406,28 @@ async function runDownload(targetUrl) {
     const jobId = data.job_id;
     if (!jobId) throw new Error("No job_id");
 
+    const jobSnapshot = {
+      jobId,
+      serverUrl,
+      url: targetUrl,
+      title: body.title,
+      thumbnail: body.thumbnail,
+      status: "downloading",
+      progress: 0,
+      progress_text: "",
+      filename: null,
+      error: null,
+      savedToDevice: false,
+    };
+
+    if (currentTabId != null) {
+      chrome.storage.local.get(JOBS_KEY, (r) => {
+        const map = migrateJobsMap(r[JOBS_KEY] || {});
+        map[jobId] = { ...jobSnapshot, tabId: currentTabId, updatedAt: Date.now() };
+        chrome.storage.local.set({ [JOBS_KEY]: map });
+      });
+    }
+
     chrome.runtime.sendMessage({
       type: "RECLIP_START_JOB",
       tabId: currentTabId,
@@ -323,6 +439,8 @@ async function runDownload(targetUrl) {
     });
 
     showStatus("Downloading\u2026", "", true);
+    const btnCancel = $("btnCancelDownload");
+    if (btnCancel) btnCancel.classList.remove("hidden");
     startLocalPolling(serverUrl, jobId);
   } catch (e) {
     showStatus(e.message || String(e), "error", false);
@@ -333,32 +451,83 @@ async function runDownload(targetUrl) {
 }
 
 function startLocalPolling(serverUrl, jobId) {
-  const iv = setInterval(async () => {
+  if (statusPollInterval) {
+    clearInterval(statusPollInterval);
+    statusPollInterval = null;
+  }
+  currentPollingJobId = jobId;
+
+  const pollOnce = async () => {
     try {
       const res = await fetch(`${serverUrl}/api/status/${jobId}`);
       const data = await res.json().catch(() => ({}));
       if (data.status === "done") {
-        clearInterval(iv);
+        if (statusPollInterval) clearInterval(statusPollInterval);
+        statusPollInterval = null;
+        const entry = await getJobEntryByJobId(jobId);
+        if (entry && entry.jobId === jobId && entry.savedToDevice) {
+          showStatus(
+            entry.filename ? `Finished: ${entry.filename}` : "Download finished.",
+            "ok",
+            false
+          );
+          finishDownloadUi();
+          return;
+        }
         showStatus("Saving to device\u2026", "", true);
         await triggerBrowserDownload(serverUrl, jobId, data.filename);
+        await persistJobPatch(jobId, {
+          status: "done",
+          filename: data.filename,
+          savedToDevice: true,
+        });
         showStatus("Done.", "ok", false);
         finishDownloadUi();
       } else if (data.status === "error") {
-        clearInterval(iv);
+        if (statusPollInterval) clearInterval(statusPollInterval);
+        statusPollInterval = null;
         showStatus(data.error || "Download failed", "error", false);
+        await persistJobPatch(jobId, {
+          status: "error",
+          error: data.error || "Download failed",
+        });
+        finishDownloadUi();
+      } else if (data.status === "cancelled") {
+        if (statusPollInterval) clearInterval(statusPollInterval);
+        statusPollInterval = null;
+        showStatus(data.error || "Cancelled", "error", false);
+        await persistJobPatch(jobId, {
+          status: "cancelled",
+          error: data.error || "Cancelled",
+        });
         finishDownloadUi();
       } else if (data.progress_text) {
         showStatus(`Downloading\u2026 ${data.progress_text}`, "", true);
+      } else if (data.status === "downloading") {
+        showStatus("Downloading\u2026", "", true);
       }
     } catch {
-      clearInterval(iv);
+      if (statusPollInterval) clearInterval(statusPollInterval);
+      statusPollInterval = null;
       showStatus("Lost connection to server", "error", false);
       finishDownloadUi();
     }
+  };
+
+  void pollOnce();
+  statusPollInterval = setInterval(() => {
+    void pollOnce();
   }, 1000);
 }
 
 function finishDownloadUi() {
+  if (statusPollInterval) {
+    clearInterval(statusPollInterval);
+    statusPollInterval = null;
+  }
+  currentPollingJobId = null;
+  const btnCancel = $("btnCancelDownload");
+  if (btnCancel) btnCancel.classList.add("hidden");
   const btnDl = $("btnDownloadPage");
   const btnPaste = $("btnPasteSend");
   if (btnDl) btnDl.disabled = false;
@@ -435,37 +604,182 @@ function renderStreams(streams, pageUrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Restore active job from background
+// Jobs list & cancel
 // ---------------------------------------------------------------------------
 
-async function restoreActiveJob() {
-  if (!currentTabId) return;
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "RECLIP_GET_JOB", tabId: currentTabId }, (resp) => {
-      if (chrome.runtime.lastError || !resp || !resp.job) {
-        resolve(false);
-        return;
+async function cancelDownloadForJob(jobId, serverUrl, tabIdForJob) {
+  const base = normalizeBase(serverUrl);
+  try {
+    await fetch(`${base}/api/cancel/${jobId}`, { method: "POST" });
+  } catch {
+    /* server may already have stopped */
+  }
+  await persistJobPatch(jobId, { status: "cancelled", error: "Cancelled" });
+  const tid = typeof tabIdForJob === "number" ? tabIdForJob : Number(tabIdForJob);
+  if (!Number.isNaN(tid)) {
+    chrome.runtime.sendMessage({ type: "RECLIP_STOP_POLLING_FOR_TAB", tabId: tid });
+  }
+  if (currentPollingJobId === jobId) {
+    if (statusPollInterval) clearInterval(statusPollInterval);
+    statusPollInterval = null;
+    currentPollingJobId = null;
+    showStatus("Cancelled.", "error", false);
+    finishDownloadUi();
+  }
+  await renderJobsList();
+}
+
+async function cancelCurrentDownload() {
+  if (!currentPollingJobId) return;
+  const entry = await getJobEntryByJobId(currentPollingJobId);
+  if (!entry || !entry.serverUrl) return;
+  await cancelDownloadForJob(currentPollingJobId, entry.serverUrl, entry.tabId);
+}
+
+function jobStatusLabel(st) {
+  if (st === "downloading") return "Downloading";
+  if (st === "done") return "Done";
+  if (st === "error") return "Error";
+  if (st === "cancelled") return "Cancelled";
+  return st || "?";
+}
+
+function showMainPanel(which) {
+  const main = $("panel-main");
+  const jobs = $("panel-jobs");
+  const tabMain = $("tabMain");
+  const tabJobs = $("tabJobs");
+  if (!main || !jobs) return;
+  if (which === "jobs") {
+    main.classList.add("hidden");
+    jobs.classList.remove("hidden");
+    if (tabMain) {
+      tabMain.classList.remove("active");
+      tabMain.setAttribute("aria-selected", "false");
+    }
+    if (tabJobs) {
+      tabJobs.classList.add("active");
+      tabJobs.setAttribute("aria-selected", "true");
+    }
+    renderJobsList();
+  } else {
+    jobs.classList.add("hidden");
+    main.classList.remove("hidden");
+    if (tabJobs) {
+      tabJobs.classList.remove("active");
+      tabJobs.setAttribute("aria-selected", "false");
+    }
+    if (tabMain) {
+      tabMain.classList.add("active");
+      tabMain.setAttribute("aria-selected", "true");
+    }
+    refreshStreams();
+  }
+}
+
+async function renderJobsList() {
+  const container = $("jobsList");
+  if (!container) return;
+  const serverUrl = await getServerUrl();
+  const r = await new Promise((resolve) => {
+    chrome.storage.local.get(JOBS_KEY, resolve);
+  });
+  const map = migrateJobsMap(r[JOBS_KEY] || {});
+  const entries = Object.entries(map).sort(
+    (a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0)
+  );
+  if (!entries.length) {
+    container.innerHTML = '<p class="hint">No jobs yet.</p>';
+    return;
+  }
+  container.innerHTML = "";
+  for (const [jid, j] of entries) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const title = j.title || j.url || jid;
+    const shortId = jid.length > 10 ? `${jid.slice(0, 10)}\u2026` : jid;
+    const prog =
+      j.progress_text ||
+      (typeof j.progress === "number" && j.progress > 0 ? `${Math.round(j.progress)}%` : "");
+    const parts = [`${shortId}`, jobStatusLabel(j.status)];
+    if (prog) parts.push(trunc(prog, 36));
+    const metaLine = parts.join(" \u00b7 ");
+
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+
+    if (j.status === "downloading") {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "small cancel-job-btn";
+      b.textContent = "Cancel";
+      b.dataset.jid = jid;
+      actions.appendChild(b);
+    }
+    if (j.status === "done" && !j.savedToDevice && serverUrl) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "small save-job-btn";
+      b.textContent = "Save";
+      b.dataset.jid = jid;
+      actions.appendChild(b);
+    }
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "small secondary remove-job-btn";
+    rm.textContent = "Remove";
+    rm.dataset.jid = jid;
+    actions.appendChild(rm);
+
+    const main = document.createElement("div");
+    main.className = "job-row-main";
+    const tEl = document.createElement("div");
+    tEl.className = "job-title";
+    tEl.textContent = trunc(title, 52);
+    const mEl = document.createElement("div");
+    mEl.className = "job-meta";
+    mEl.textContent = metaLine;
+    main.appendChild(tEl);
+    main.appendChild(mEl);
+
+    row.appendChild(main);
+    row.appendChild(actions);
+    container.appendChild(row);
+  }
+
+  container.querySelectorAll(".cancel-job-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.jid;
+      chrome.storage.local.get(JOBS_KEY, async (r) => {
+        const m = migrateJobsMap(r[JOBS_KEY] || {});
+        const j = m[id];
+        if (!j || !j.serverUrl) return;
+        await cancelDownloadForJob(id, j.serverUrl, j.tabId);
+      });
+    });
+  });
+  container.querySelectorAll(".remove-job-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await removeJobFromStorage(btn.dataset.jid);
+      renderJobsList();
+    });
+  });
+  container.querySelectorAll(".save-job-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.jid;
+      const j = map[id];
+      if (!j || !serverUrl) return;
+      try {
+        const st = await fetch(`${serverUrl}/api/status/${id}`);
+        const d = await st.json().catch(() => ({}));
+        if (d.status === "done" && d.filename) {
+          await triggerBrowserDownload(serverUrl, id, d.filename);
+          await persistJobPatch(id, { savedToDevice: true, filename: d.filename });
+        }
+      } catch {
+        /* ignore */
       }
-      const j = resp.job;
-      if (j.status === "downloading") {
-        showStatus(j.progress_text ? `Downloading\u2026 ${j.progress_text}` : "Downloading\u2026", "", true);
-        const btnDl = $("btnDownloadPage");
-        const btnPaste = $("btnPasteSend");
-        if (btnDl) btnDl.disabled = true;
-        if (btnPaste) btnPaste.disabled = true;
-        setDownloadUiBusy(true);
-        startLocalPolling(j.serverUrl, j.jobId);
-        resolve(true);
-      } else if (j.status === "done") {
-        showStatus("Done.", "ok", false);
-        triggerBrowserDownload(j.serverUrl, j.jobId, j.filename);
-        resolve(true);
-      } else if (j.status === "error") {
-        showStatus(j.error || "Download failed", "error", false);
-        resolve(true);
-      } else {
-        resolve(false);
-      }
+      renderJobsList();
     });
   });
 }
@@ -473,6 +787,22 @@ async function restoreActiveJob() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+
+function samePageUrl(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    if (ua.origin !== ub.origin || ua.pathname !== ub.pathname) return false;
+    const va = ua.searchParams.get("v");
+    const vb = ub.searchParams.get("v");
+    if (va && vb) return va === vb;
+    return ua.search === ub.search;
+  } catch {
+    return false;
+  }
+}
 
 async function refreshStreams() {
   const serverUrl = await getServerUrl();
@@ -483,18 +813,105 @@ async function refreshStreams() {
     if (!tab || !tab.id) return;
     currentTabId = tab.id;
     currentPageUrl = tab.url || "";
+    const tabKey = String(tab.id);
 
-    chrome.runtime.sendMessage({ type: "RECLIP_GET_STREAMS", tabId: tab.id }, (resp) => {
-      const streams = (resp && resp.streams) || [];
-      renderStreams(streams, currentPageUrl);
-      const btnDl = $("btnDownloadPage");
-      if (btnDl) {
-        btnDl.onclick = () => runDownload(pickDownloadUrl(streams, currentPageUrl));
+    const [streamsResp, storageData] = await Promise.all([
+      new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: "RECLIP_GET_STREAMS", tabId: tab.id }, resolve);
+      }),
+      new Promise((resolve) => {
+        chrome.storage.local.get(["reclipJobs", "reclipPageInfo"], resolve);
+      }),
+    ]);
+
+    const streams = (streamsResp && streamsResp.streams) || [];
+    renderStreams(streams, currentPageUrl);
+    const btnDl = $("btnDownloadPage");
+    if (btnDl) {
+      btnDl.onclick = () => runDownload(pickDownloadUrl(streams, currentPageUrl));
+    }
+
+    const jobsMap = migrateJobsMap(storageData.reclipJobs || {});
+    const infoMap = storageData.reclipPageInfo || {};
+    const job = pickPrimaryJobForTab(jobsMap, tab.id);
+    const cached = infoMap[tabKey] || null;
+    const pageInfo = cached && cached.info && samePageUrl(cached.pageUrl, currentPageUrl)
+      ? cached
+      : null;
+
+    if (pageInfo) {
+      showInfoCard(pageInfo.info, pageInfo.selectedFormatId);
+    }
+
+    if (job && job.status === "downloading") {
+      let resumePolling = true;
+      try {
+        const st = await fetch(`${job.serverUrl}/api/status/${job.jobId}`);
+        const sd = await st.json().catch(() => ({}));
+        if (sd.status === "done") {
+          resumePolling = false;
+          if (job.savedToDevice) {
+            showStatus(
+              job.filename ? `Finished: ${job.filename}` : "Download finished.",
+              "ok",
+              false
+            );
+          } else {
+            showStatus("Saving to device\u2026", "", true);
+            if (btnDl) btnDl.disabled = true;
+            const btnPaste = $("btnPasteSend");
+            if (btnPaste) btnPaste.disabled = true;
+            setDownloadUiBusy(true);
+            await triggerBrowserDownload(job.serverUrl, job.jobId, sd.filename);
+            await persistJobPatch(job.jobId, {
+              status: "done",
+              filename: sd.filename,
+              savedToDevice: true,
+            });
+            showStatus("Done.", "ok", false);
+            if (btnDl) btnDl.disabled = false;
+            if (btnPaste) btnPaste.disabled = false;
+            setDownloadUiBusy(false);
+          }
+        } else if (sd.status === "cancelled") {
+          resumePolling = false;
+          showStatus(sd.error || "Cancelled.", "error", false);
+          await persistJobPatch(job.jobId, {
+            status: "cancelled",
+            error: sd.error || "Cancelled",
+          });
+        }
+      } catch {
+        /* ignore; fall back to polling */
       }
-    });
 
-    const restored = await restoreActiveJob();
-    if (!restored && serverUrl && currentPageUrl.startsWith("http")) {
+      if (resumePolling) {
+        let statusLine = "Downloading\u2026";
+        if (job.progress_text) {
+          statusLine = `Downloading\u2026 ${job.progress_text}`;
+        } else if (typeof job.progress === "number" && !Number.isNaN(job.progress) && job.progress > 0) {
+          statusLine = `Downloading\u2026 ${Math.round(job.progress)}%`;
+        }
+        showStatus(statusLine, "", true);
+        if (btnDl) btnDl.disabled = true;
+        const btnPaste = $("btnPasteSend");
+        if (btnPaste) btnPaste.disabled = true;
+        setDownloadUiBusy(true);
+        const btnCancel = $("btnCancelDownload");
+        if (btnCancel) btnCancel.classList.remove("hidden");
+        startLocalPolling(job.serverUrl, job.jobId);
+        chrome.runtime.sendMessage({ type: "RECLIP_ENSURE_POLLING", tabId: tab.id });
+      }
+    } else if (job && job.status === "done") {
+      showStatus(job.filename ? `Finished: ${job.filename}` : "Download finished.", "ok", false);
+    } else if (job && job.status === "error") {
+      showStatus(job.error || "Download failed", "error", false);
+    } else if (job && job.status === "cancelled") {
+      showStatus(job.error || "Cancelled.", "error", false);
+    }
+
+    const skipInfoFetch = (job && job.status === "downloading") || pageInfo;
+    if (!skipInfoFetch && serverUrl && currentPageUrl.startsWith("http")) {
       fetchPageInfo(serverUrl, currentPageUrl);
     }
   });
@@ -536,6 +953,15 @@ async function showView() {
 document.addEventListener("DOMContentLoaded", () => {
   initFormatPills();
   initStreamsToggle();
+
+  const tabMainEl = $("tabMain");
+  if (tabMainEl) tabMainEl.addEventListener("click", () => showMainPanel("main"));
+  const tabJobsEl = $("tabJobs");
+  if (tabJobsEl) tabJobsEl.addEventListener("click", () => showMainPanel("jobs"));
+  const btnCancelDl = $("btnCancelDownload");
+  if (btnCancelDl) btnCancelDl.addEventListener("click", () => cancelCurrentDownload());
+  const btnRefJobs = $("btnRefreshJobs");
+  if (btnRefJobs) btnRefJobs.addEventListener("click", () => renderJobsList());
 
   $("btnSaveConfig").addEventListener("click", async () => {
     const v = $("serverUrl").value;
