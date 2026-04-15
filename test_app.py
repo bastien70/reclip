@@ -291,3 +291,99 @@ def test_write_and_read_meta(isolated_dirs):
 
 def test_read_meta_missing(isolated_dirs):
     assert reclip_app._read_meta("nonexistent.mp4") is None
+
+
+# ---------------------------------------------------------------------------
+# yt-dlp metadata helpers (library title / thumbnail)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_from_ytdlp_info_uses_thumbnail_field():
+    info = {
+        "title": "Hello",
+        "thumbnail": "https://cdn.example/thumb.jpg",
+        "uploader": "u1",
+        "duration": 42,
+    }
+    m = reclip_app.metadata_from_ytdlp_info(info)
+    assert m["title"] == "Hello"
+    assert m["thumbnail"] == "https://cdn.example/thumb.jpg"
+    assert m["uploader"] == "u1"
+    assert m["duration"] == 42
+
+
+def test_metadata_from_ytdlp_info_picks_best_thumbnails_entry():
+    info = {
+        "title": "T",
+        "thumbnails": [
+            {"url": "https://a/small.jpg", "height": 180},
+            {"url": "https://a/large.jpg", "height": 720},
+        ],
+    }
+    m = reclip_app.metadata_from_ytdlp_info(info)
+    assert m["thumbnail"] == "https://a/large.jpg"
+
+
+def test_metadata_from_ytdlp_info_non_dict():
+    assert reclip_app.metadata_from_ytdlp_info(None) == {}
+    assert reclip_app.metadata_from_ytdlp_info("x") == {}
+
+
+def test_merge_job_from_ytdlp_metadata_fills_empty_only():
+    job = {"title": "", "thumbnail": "", "uploader": "", "duration": None}
+    meta = {
+        "title": "From yt-dlp",
+        "thumbnail": "https://x/th.jpg",
+        "uploader": "chan",
+        "duration": 99,
+    }
+    reclip_app.merge_job_from_ytdlp_metadata(job, meta)
+    assert job["title"] == "From yt-dlp"
+    assert job["thumbnail"] == "https://x/th.jpg"
+    assert job["uploader"] == "chan"
+    assert job["duration"] == 99
+
+
+def test_merge_job_from_ytdlp_metadata_preserves_client_title():
+    job = {"title": "Client title", "thumbnail": "", "uploader": "", "duration": None}
+    meta = {"title": "yt-dlp title", "thumbnail": "https://t.jpg", "uploader": "u", "duration": 1}
+    reclip_app.merge_job_from_ytdlp_metadata(job, meta)
+    assert job["title"] == "Client title"
+    assert job["thumbnail"] == "https://t.jpg"
+
+
+# ---------------------------------------------------------------------------
+# CORS (browser extension)
+# ---------------------------------------------------------------------------
+
+
+EXT_ORIGIN = "chrome-extension://abcdefghijklmnopqrstuvwxyz123456"
+
+
+def test_cors_preflight_options(client):
+    rv = client.open(
+        "/api/download",
+        method="OPTIONS",
+        headers={"Origin": EXT_ORIGIN},
+    )
+    assert rv.status_code == 204
+    assert rv.headers.get("Access-Control-Allow-Origin") == EXT_ORIGIN
+    assert "POST" in (rv.headers.get("Access-Control-Allow-Methods") or "")
+
+
+def test_cors_get_library(client, isolated_dirs):
+    rv = client.get(
+        "/api/library",
+        headers={"Origin": EXT_ORIGIN},
+    )
+    assert rv.status_code == 200
+    assert rv.headers.get("Access-Control-Allow-Origin") == EXT_ORIGIN
+
+
+def test_cors_not_applied_to_non_extension_origin(client, isolated_dirs):
+    rv = client.get(
+        "/api/library",
+        headers={"Origin": "http://example.com"},
+    )
+    assert rv.status_code == 200
+    assert rv.headers.get("Access-Control-Allow-Origin") is None

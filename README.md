@@ -18,6 +18,7 @@ https://github.com/user-attachments/assets/419d3e50-c933-444b-8cab-a9724986ba05
 - Automatic URL deduplication
 - **Library** — browse files stored on the server, **Save** to your device again, or **Delete** from disk
 - **Settings** — optional automatic deletion of media older than **X** days (background cleanup about every hour)
+- **Browser extension** (Chrome / Brave, unpacked) — detect streams on the current tab, send URLs to ReClip, download to your device when ready
 - Clean, responsive UI — no frameworks, no build step
 - Backend: Python + Flask (single `app.py`); frontend: vanilla HTML/CSS/JS (single template)
 
@@ -80,6 +81,32 @@ Completed downloads are stored on the server under **`downloads/`** (next to `ap
 | `downloads/` | Downloaded media (gitignored) |
 | `settings.json` | Auto-delete days and future settings (gitignored) |
 
+## Browser extension (Chrome / Brave)
+
+An unpacked **Manifest V3** extension lives in [`extension/`](extension/). It:
+
+- Detects `<video>` / `<source>` URLs and common embeds (YouTube, Vimeo) in the page
+- Observes network requests for likely stream URLs (`.m3u8`, `.mpd`, `.mp4`, `.webm`, …)
+- Lets you choose **MP4** or **MP3**, send the current page URL (or a pasted URL) to ReClip, and **download the file** via the browser when the server job finishes
+- Stores your ReClip **base URL** (e.g. `http://192.168.1.22:8899`) in `chrome.storage.sync`
+
+### Install (developer mode)
+
+1. Open `chrome://extensions` or `brave://extensions`
+2. Turn on **Developer mode**
+3. Click **Load unpacked** and choose the **`extension`** directory from this repository
+
+On first open, set the server URL and click **Save**. Use **Settings** in the popup to change it later.
+
+The Flask app sends **CORS** headers for `chrome-extension://` origins so the extension can call the API from your browser.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt   # or: pip install pytest
+pytest test_app.py
+```
+
 ## Raspberry Pi (e.g. Pi 5, Pi 4, 64-bit OS)
 
 1. Install Docker: `curl -fsSL https://get.docker.com \| sudo sh` and add your user to the `docker` group.
@@ -107,7 +134,7 @@ YouTube, TikTok, Instagram, Twitter/X, Reddit, Facebook, Vimeo, Twitch, Dailymot
 - **Backend:** Python + Flask (`app.py`)
 - **Frontend:** Vanilla HTML/CSS/JS (`templates/index.html`)
 - **Download engine:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) + [ffmpeg](https://ffmpeg.org/)
-- **Dependencies:** Flask, yt-dlp (`requirements.txt`)
+- **Dependencies:** Flask, yt-dlp (`requirements.txt`); dev tests: `requirements-dev.txt` (pytest)
 
 ## Disclaimer
 

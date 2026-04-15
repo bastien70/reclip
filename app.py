@@ -7,9 +7,32 @@ import subprocess
 import threading
 from urllib.parse import unquote
 
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, Response
 
 app = Flask(__name__)
+
+
+@app.before_request
+def cors_preflight():
+    if request.method == "OPTIONS":
+        origin = request.headers.get("Origin", "")
+        if origin.startswith("chrome-extension://"):
+            resp = Response(status=204)
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            resp.headers["Access-Control-Max-Age"] = "86400"
+            return resp
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    if origin.startswith("chrome-extension://"):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(_BASE_DIR, "downloads")
 SETTINGS_PATH = os.path.join(_BASE_DIR, "settings.json")
@@ -137,6 +160,79 @@ def _read_meta(media_filename):
         return None
 
 
+def metadata_from_ytdlp_info(info):
+    """Extract title, thumbnail URL, uploader, duration from yt-dlp -j output."""
+    if not isinstance(info, dict):
+        return {}
+    raw_title = info.get("title")
+    title = raw_title.strip() if isinstance(raw_title, str) else str(raw_title or "").strip()
+
+    thumbnail = ""
+    direct = info.get("thumbnail")
+    if isinstance(direct, str) and direct.startswith(("http://", "https://")):
+        thumbnail = direct
+    if not thumbnail:
+        thumbs = info.get("thumbnails") or []
+        best_url = None
+        best_h = -1
+        for item in thumbs:
+            if not isinstance(item, dict):
+                continue
+            u = item.get("url")
+            if not isinstance(u, str) or not u.startswith(("http://", "https://")):
+                continue
+            h = item.get("height")
+            try:
+                h = int(h) if h is not None else 0
+            except (TypeError, ValueError):
+                h = 0
+            if h > best_h:
+                best_h = h
+                best_url = u
+        if best_url:
+            thumbnail = best_url
+
+    uploader = info.get("uploader") or ""
+    if isinstance(uploader, str):
+        uploader = uploader.strip()
+    else:
+        uploader = str(uploader).strip()
+
+    duration = info.get("duration")
+    return {
+        "title": title,
+        "thumbnail": thumbnail,
+        "uploader": uploader,
+        "duration": duration,
+    }
+
+
+def fetch_ytdlp_json(url):
+    """Run yt-dlp -j on url; return parsed dict or None on failure."""
+    cmd = ["yt-dlp", "--no-playlist", "-j", url]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def merge_job_from_ytdlp_metadata(job, meta):
+    """Fill empty job fields from yt-dlp metadata (does not overwrite client-provided values)."""
+    if not meta:
+        return
+    if not str(job.get("title") or "").strip() and meta.get("title"):
+        job["title"] = meta["title"]
+    if not str(job.get("thumbnail") or "").strip() and meta.get("thumbnail"):
+        job["thumbnail"] = meta["thumbnail"]
+    if not str(job.get("uploader") or "").strip() and meta.get("uploader"):
+        job["uploader"] = meta["uploader"]
+    if job.get("duration") is None and meta.get("duration") is not None:
+        job["duration"] = meta["duration"]
+
+
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
@@ -178,6 +274,10 @@ def run_download(job_id, url, format_choice, format_id):
                     os.remove(f)
                 except OSError:
                     pass
+
+        info_json = fetch_ytdlp_json(url)
+        if info_json:
+            merge_job_from_ytdlp_metadata(job, metadata_from_ytdlp_info(info_json))
 
         job["status"] = "done"
         job["file"] = chosen

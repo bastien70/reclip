@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ReClip</title>
+  <style>
+    :root {
+      --bg: #f4f1eb;
+      --fg: #3a3a38;
+      --accent: #e85d2a;
+      --muted: #9c9889;
+      --card: #fff;
+      --border: #e2ded6;
+      --error: #c43d3d;
+      --success: #2d8a4e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      min-height: 200px;
+      font-family: system-ui, Segoe UI, sans-serif;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--fg);
+      padding: 14px;
+    }
+    h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--fg);
+    }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+    input[type="text"], input[type="url"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--fg);
+      margin-bottom: 10px;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+    button {
+      padding: 8px 14px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    button:hover { filter: brightness(0.95); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: var(--fg); color: #fff; }
+    button.small { padding: 4px 10px; font-size: 0.72rem; }
+    button.btn-primary {
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 0.9rem;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(232, 93, 42, 0.25);
+    }
+    button.btn-primary:hover { filter: brightness(0.97); }
+    /* Pills must override global button white text */
+    button.pill {
+      background: var(--card);
+      color: var(--fg);
+      border: 1.5px solid var(--border);
+      font-weight: 600;
+    }
+    button.pill:hover { filter: none; border-color: var(--muted); }
+    button.pill.active {
+      background: var(--fg);
+      color: var(--bg);
+      border-color: var(--fg);
+    }
+    .section { margin-bottom: 16px; }
+    .hint { font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; line-height: 1.4; }
+    .stream-item {
+      padding: 8px 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 0.75rem;
+      word-break: break-word;
+    }
+    .stream-item .meta {
+      color: var(--fg);
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+      line-height: 1.25;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .stream-item .url-preview {
+      color: var(--muted);
+      font-size: 0.68rem;
+      line-height: 1.3;
+    }
+    .pill-group { display: flex; gap: 4px; }
+    #statusRow {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.75rem;
+      min-height: 2.2em;
+    }
+    #statusRow.visible { display: flex; }
+    .spinner {
+      flex-shrink: 0;
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+    }
+    .spinner.hidden { display: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #status { flex: 1; line-height: 1.35; color: var(--fg); }
+    #status.error { color: var(--error); }
+    #status.ok { color: var(--success); }
+    .hidden { display: none !important; }
+    a.link { color: var(--accent); cursor: pointer; text-decoration: underline; font-size: 0.75rem; }
+    button.link-btn {
+      width: 100%;
+      background: transparent;
+      color: var(--accent);
+      border: 1px dashed var(--border);
+      padding: 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    button.link-btn:hover { background: rgba(232, 93, 42, 0.06); filter: none; }
+    #streamsPanel { margin-top: 8px; }
+    .stream-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin-bottom: 6px;
+    }
+    .stream-row .stream-item { flex: 1; margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <div id="view-config" class="section">
+    <h1>ReClip</h1>
+    <label for="serverUrl">Server URL</label>
+    <input type="url" id="serverUrl" placeholder="http://192.168.1.22:8899" autocomplete="off" />
+    <p class="hint">Base URL of your ReClip server (no trailing slash).</p>
+    <button type="button" id="btnSaveConfig">Save</button>
+    <p id="statusConfig" style="margin-top:8px;font-size:0.75rem;min-height:1.2em;"></p>
+  </div>
+
+  <div id="view-main" class="hidden">
+    <div class="row" style="justify-content: space-between; align-items: center;">
+      <h1 style="margin:0;">ReClip</h1>
+      <a class="link" id="btnOpenSettings">Settings</a>
+    </div>
+    <p class="hint" id="serverHint"></p>
+
+    <div class="section">
+      <label>Format</label>
+      <div class="pill-group" id="formatPills">
+        <button type="button" class="pill active" data-format="video">MP4</button>
+        <button type="button" class="pill" data-format="audio">MP3</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label>Download</label>
+      <p class="hint">Best for YouTube, X/Twitter, TikTok: sends this tab’s page URL to ReClip (yt-dlp).</p>
+      <button type="button" class="btn-primary" id="btnDownloadPage">Download this page</button>
+    </div>
+
+    <div class="section">
+      <label for="pasteUrl">Paste URL</label>
+      <input type="text" id="pasteUrl" placeholder="https://..." />
+      <button type="button" id="btnPasteSend">Send to ReClip</button>
+    </div>
+
+    <div class="section" id="streamsSection">
+      <button type="button" class="link-btn" id="btnToggleStreams" aria-expanded="false">Show detected streams</button>
+      <div id="streamsPanel" class="hidden">
+        <p class="hint">Advanced: pick a raw stream (e.g. HLS). For most sites, use “Download this page” above.</p>
+        <div id="streamList"></div>
+      </div>
+    </div>
+
+    <div id="statusRow" aria-live="polite">
+      <span class="spinner hidden" id="statusSpinner" role="status"></span>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
