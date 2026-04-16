@@ -1,14 +1,16 @@
 /**
  * Merge network-detected stream URLs with DOM URLs per tab; update badge.
  * Jobs + page info cache persist in chrome.storage.local (survives SW restarts + extension reloads).
+ * Polling uses chrome.alarms to survive MV3 service-worker idle shutdown.
  */
 const tabStreams = new Map();
 const activeJobs = new Map();
 
 const JOBS_KEY = "reclipJobs";
 const PAGE_INFO_KEY = "reclipPageInfo";
+const ALARM_PREFIX = "reclip-poll-";
+const POLL_PERIOD_MIN = 0.05; // ~3 seconds (minimum Chrome allows in dev)
 
-/** Migrate tabId-keyed map to jobId-keyed (one global list of jobs). */
 function migrateJobsMap(raw) {
   if (!raw || typeof raw !== "object") return {};
   const keys = Object.keys(raw);
@@ -72,85 +74,74 @@ async function persistJobSnapshot(tabId, job) {
   await saveJobsMap(m);
 }
 
-async function removeJobFromStorageByJobId(jobId) {
-  const m = await loadJobsMap();
-  delete m[jobId];
-  await saveJobsMap(m);
-}
-
 function addUrl(tabId, url, meta = {}) {
   if (!url || !tabId || tabId < 0) return;
   if (!tabStreams.has(tabId)) tabStreams.set(tabId, new Map());
   const m = tabStreams.get(tabId);
   if (!m.has(url)) m.set(url, { label: meta.label || url.slice(0, 80), kind: meta.kind || "network" });
-  updateBadge(tabId);
 }
 
-/** Badge flash timers (done/error) per tab. */
-const badgeFlashTimers = new Map();
+// ---------------------------------------------------------------------------
+// Badge
+// ---------------------------------------------------------------------------
 
-function clearBadgeFlash(tabId) {
-  const t = badgeFlashTimers.get(tabId);
-  if (t) {
-    clearTimeout(t);
-    badgeFlashTimers.delete(tabId);
+let badgeFlashTimer = null;
+
+function clearBadgeFlash() {
+  if (badgeFlashTimer) {
+    clearTimeout(badgeFlashTimer);
+    badgeFlashTimer = null;
   }
 }
 
-/** Max 4 chars for chrome.action badge text. */
 function jobBadgeText(job) {
   if (!job || job.status !== "downloading") return "";
   const p = job.progress;
   if (typeof p === "number" && !Number.isNaN(p) && p > 0) {
     const n = Math.round(p);
-    const s = n >= 100 ? "99" : String(Math.min(99, n));
-    return s.length <= 4 ? s : s.slice(0, 4);
+    return n >= 100 ? "99" : String(Math.min(99, n));
   }
   return "DL";
 }
 
 /**
- * Stream count badge (orange) or job badge (blue) when a download is active for this tab.
+ * Global badge: if ANY tab has an active download, show blue badge with progress.
+ * Otherwise clear.
  */
-function refreshActionBadge(tabId) {
-  clearBadgeFlash(tabId);
-  const job = activeJobs.get(tabId);
-  if (job && job.status === "downloading") {
-    const text = jobBadgeText(job);
-    chrome.action.setBadgeText({ tabId, text: text || "DL" });
-    chrome.action.setBadgeBackgroundColor({ tabId, color: "#2196F3" });
-    return;
+function refreshActionBadge() {
+  clearBadgeFlash();
+  for (const [, job] of activeJobs) {
+    if (job && job.status === "downloading") {
+      const text = jobBadgeText(job) || "DL";
+      chrome.action.setBadgeText({ text });
+      chrome.action.setBadgeBackgroundColor({ color: "#2196F3" });
+      return;
+    }
   }
-  const m = tabStreams.get(tabId);
-  const n = m ? m.size : 0;
-  chrome.action.setBadgeText({ tabId, text: n > 0 ? String(Math.min(n, 99)) : "" });
-  chrome.action.setBadgeBackgroundColor({ tabId, color: "#e85d2a" });
+  chrome.action.setBadgeText({ text: "" });
 }
 
 function flashBadgeThenRestore(tabId, kind) {
-  clearBadgeFlash(tabId);
+  clearBadgeFlash();
   if (kind === "ok") {
-    chrome.action.setBadgeText({ tabId, text: "OK" });
-    chrome.action.setBadgeBackgroundColor({ tabId, color: "#2e7d32" });
+    chrome.action.setBadgeText({ text: "\u2713" });
+    chrome.action.setBadgeBackgroundColor({ color: "#2e7d32" });
   } else {
-    chrome.action.setBadgeText({ tabId, text: "!" });
-    chrome.action.setBadgeBackgroundColor({ tabId, color: "#c62828" });
+    chrome.action.setBadgeText({ text: "!" });
+    chrome.action.setBadgeBackgroundColor({ color: "#c62828" });
   }
-  const t = setTimeout(() => {
-    badgeFlashTimers.delete(tabId);
-    refreshActionBadge(tabId);
+  badgeFlashTimer = setTimeout(() => {
+    badgeFlashTimer = null;
+    refreshActionBadge();
   }, 3000);
-  badgeFlashTimers.set(tabId, t);
 }
 
-function updateBadge(tabId) {
-  refreshActionBadge(tabId);
+function updateBadge() {
+  refreshActionBadge();
 }
 
 function clearTab(tabId) {
   tabStreams.delete(tabId);
-  clearBadgeFlash(tabId);
-  chrome.action.setBadgeText({ tabId, text: "" });
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +162,18 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 
 // ---------------------------------------------------------------------------
-// Job polling (background-side)
+// Job polling via chrome.alarms (survives SW idle shutdown)
 // ---------------------------------------------------------------------------
+
+function alarmName(tabId) {
+  return ALARM_PREFIX + tabId;
+}
+
+function tabIdFromAlarm(name) {
+  if (!name.startsWith(ALARM_PREFIX)) return null;
+  const n = Number(name.slice(ALARM_PREFIX.length));
+  return Number.isNaN(n) ? null : n;
+}
 
 async function pollJobTick(tabId) {
   const j = activeJobs.get(tabId);
@@ -184,52 +185,73 @@ async function pollJobTick(tabId) {
     j.progress = data.progress ?? j.progress;
     j.progress_text = data.progress_text || j.progress_text;
     if (data.status === "done") {
-      if (j._interval) clearInterval(j._interval);
-      j._interval = null;
       j.filename = data.filename;
       j.status = "done";
       await persistJobSnapshot(tabId, j);
+      stopJobPolling(tabId);
       flashBadgeThenRestore(tabId, "ok");
-      activeJobs.delete(tabId);
       return;
     }
     if (data.status === "error" || data.status === "cancelled") {
-      if (j._interval) clearInterval(j._interval);
-      j._interval = null;
       j.error = data.error;
       j.status = data.status;
       await persistJobSnapshot(tabId, j);
+      stopJobPolling(tabId);
       flashBadgeThenRestore(tabId, "error");
-      activeJobs.delete(tabId);
       return;
     }
     await persistJobSnapshot(tabId, j);
-    refreshActionBadge(tabId);
+    refreshActionBadge();
   } catch {
-    if (j._interval) clearInterval(j._interval);
-    j._interval = null;
     j.status = "error";
     j.error = "Lost connection to server";
     await persistJobSnapshot(tabId, j);
+    stopJobPolling(tabId);
     flashBadgeThenRestore(tabId, "error");
-    activeJobs.delete(tabId);
   }
 }
 
 function startJobPolling(tabId) {
   const job = activeJobs.get(tabId);
-  if (!job || job._interval) return;
-
-  refreshActionBadge(tabId);
+  if (!job) return;
+  refreshActionBadge();
   void pollJobTick(tabId);
-
-  job._interval = setInterval(() => {
-    void pollJobTick(tabId);
-  }, 1200);
+  chrome.alarms.create(alarmName(tabId), { periodInMinutes: POLL_PERIOD_MIN });
 }
 
+function stopJobPolling(tabId) {
+  activeJobs.delete(tabId);
+  chrome.alarms.clear(alarmName(tabId));
+}
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  const tabId = tabIdFromAlarm(alarm.name);
+  if (tabId == null) return;
+
+  if (!activeJobs.has(tabId)) {
+    const m = await loadJobsMap();
+    let raw = null;
+    for (const j of Object.values(m)) {
+      if (String(j.tabId) === String(tabId) && j.status === "downloading") {
+        raw = j;
+        break;
+      }
+    }
+    if (!raw) {
+      chrome.alarms.clear(alarm.name);
+      return;
+    }
+    activeJobs.set(tabId, { ...raw });
+  }
+
+  await pollJobTick(tabId);
+});
+
 async function ensureJobPolling(tabId) {
-  if (activeJobs.has(tabId) && activeJobs.get(tabId)._interval) return;
+  if (activeJobs.has(tabId)) {
+    refreshActionBadge();
+    return;
+  }
 
   const m = await loadJobsMap();
   let raw = null;
@@ -241,8 +263,7 @@ async function ensureJobPolling(tabId) {
   }
   if (!raw) return;
 
-  const job = { ...raw, _interval: null };
-  activeJobs.set(tabId, job);
+  activeJobs.set(tabId, { ...raw });
   startJobPolling(tabId);
 }
 
@@ -278,8 +299,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "RECLIP_START_JOB") {
     const tabId = msg.tabId;
-    const prev = activeJobs.get(tabId);
-    if (prev && prev._interval) clearInterval(prev._interval);
+    stopJobPolling(tabId);
 
     const job = {
       jobId: msg.jobId,
@@ -293,9 +313,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       filename: null,
       error: null,
       savedToDevice: false,
-      _interval: null,
     };
     activeJobs.set(tabId, job);
+    refreshActionBadge();
     persistJobSnapshot(tabId, job).then(() => {
       startJobPolling(tabId);
       sendResponse({ ok: true });
@@ -310,10 +330,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "RECLIP_STOP_POLLING_FOR_TAB") {
     const tabId = msg.tabId;
-    const j = activeJobs.get(tabId);
-    if (j && j._interval) clearInterval(j._interval);
-    if (j) j._interval = null;
-    activeJobs.delete(tabId);
+    stopJobPolling(tabId);
+    refreshActionBadge();
     sendResponse({ ok: true });
     return false;
   }
@@ -348,12 +366,9 @@ function samePageUrl(a, b) {
 const lastTabUrl = new Map();
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  clearBadgeFlash(tabId);
   tabStreams.delete(tabId);
   lastTabUrl.delete(tabId);
-  const job = activeJobs.get(tabId);
-  if (job && job._interval) clearInterval(job._interval);
-  activeJobs.delete(tabId);
+  stopJobPolling(tabId);
   (async () => {
     const m = await loadPageInfoMap();
     delete m[String(tabId)];
@@ -364,7 +379,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "loading") {
     tabStreams.delete(tabId);
-    refreshActionBadge(tabId);
   }
   if (changeInfo.url) {
     const prev = lastTabUrl.get(tabId);
